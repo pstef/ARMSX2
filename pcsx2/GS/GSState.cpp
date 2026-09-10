@@ -420,7 +420,8 @@ void GSState::SetPrimHandlers()
 	m_fpGIFPackedRegHandlerLayout[GIF_REG_RGBAQXYZ2 - 2][P] = \
 		LayoutHandlerOrNull<P, GSVertexKernels::PackedLayout::PairRGBAQXYZ2, auto_flush>(); \
 	m_fpGIFPackedRegHandlerLayout[GIF_REG_XYZF2ONLY - 2][P] = \
-		LayoutHandlerOrNull<P, GSVertexKernels::PackedLayout::SingleXYZF2, auto_flush>();
+		LayoutHandlerOrNull<P, GSVertexKernels::PackedLayout::SingleXYZF2, auto_flush>(); \
+	m_fpGIFPackedRegHandlerPlan[P] = &GSState::GIFPackedRegHandlerPlan<P, auto_flush>;
 
 	SetHandlerXYZ(GS_POINTLIST, true);
 	SetHandlerXYZ(GS_LINELIST, non_sprite_af);
@@ -2916,6 +2917,148 @@ void GSState::GIFPackedRegHandlerLayout(const GIFPackedReg* RESTRICT r, u32 size
 		StoreLatchedQ(&r[(count - 1) * stride + m_packed_layout.off_a]);
 }
 
+// Every shape SetTag could not name, through one handler.
+//
+// The layout handlers above take their shape as a template parameter, so a shape
+// has to be worth an instantiation before it gets one: the enumerator, the
+// handler, the staged loop and the per-vertex batch. This one reads the shape out
+// of a GIFShapePlan at run time, so it costs one instantiation a prim and takes
+// whatever the tag says -- including a period that builds more than one vertex,
+// which a GIFPackedLayout cannot describe.
+//
+// What it gives up for that is the two-pass kernel, whose addressing is one
+// vertex per stride. It is the per-vertex batch against the per-qword replay, not
+// against the kernel.
+template <u32 prim, bool auto_flush>
+void GSState::GIFPackedRegHandlerPlan(const GIFPackedReg* RESTRICT r, u32 size)
+{
+	const u32 period = m_packed_plan.period;
+	pxAssert(size > 0 && (size % period) == 0);
+	const u32 periods = size / period;
+
+	// The flush point, for the reason spelled out at the layout handler above:
+	// collapsing the call is exact only once m_dirty_gs_regs has cleared, and
+	// until then the tag is replayed a qword at a time, which is that path.
+	u32 done = 0;
+	if (m_dirty_gs_regs)
+	{
+		while (done < periods && m_dirty_gs_regs)
+		{
+			const GIFPackedReg* RESTRICT rv = r + done * period;
+			for (u32 i = 0; i < period; i++)
+				ReplayPackedQword(m_packed_regs.U8[i], rv + i);
+			done++;
+		}
+	}
+	else
+	{
+		CheckFlushes();
+	}
+
+	if (done == periods)
+		return;
+
+	if (GSConfig.UserHacks_ForceEvenSpritePosition && m_packed_plan.tail.uv != GIF_SHAPE_CARRIED)
+		m_isPackedUV_HackFlag = true;
+
+	if constexpr (auto_flush)
+		KickPlannedStagedRun<prim>(r + done * period, periods - done);
+	else
+		KickPlannedBatch<prim>(r + done * period, periods - done);
+
+	// The batch left m_v holding the last vertex and moved neither the Q latch nor
+	// anything the period writes after that vertex -- a tag can carry writes no
+	// vertex of it ever reads, because the next period overwrites them before its
+	// own vertex gets there. The last period's do survive, so they are made here.
+	const GIFShapeVertex& last = m_packed_plan.vertices[m_packed_plan.count - 1];
+	const GIFPackedReg* RESTRICT tail = r + (periods - 1) * period;
+	if (last.src.st != GIF_SHAPE_CARRIED)
+		StoreLatchedQ(tail + last.src.st);
+	for (u32 i = last.off + 1u; i < period; i++)
+		ReplayPackedQword(m_packed_regs.U8[i], tail + i);
+}
+
+// The per-vertex direct batch for a planned shape: the shape of
+// KickPackedBatchLegacy, with the offsets read out of the plan.
+template <u32 prim>
+void GSState::KickPlannedBatch(const GIFPackedReg* RESTRICT r, u32 periods)
+{
+	const u32 period = m_packed_plan.period;
+	const u32 count = m_packed_plan.count;
+
+	// The fields the tag omits are batch-invariant by construction: no descriptor
+	// in it writes them, and a flush inside the batch moves neither m_v nor the
+	// latched Q.
+	GSVertexKernels::PlanCarry carry;
+	carry.m0 = GSVector4i(m_v.m[0]);
+	carry.q = GSVector4i::load(std::bit_cast<int>(m_q));
+	std::memcpy(&carry.uvfog, &m_v.UV, sizeof(carry.uvfog));
+
+	const GSLimit24BitDepth depth_clamp = GetDepthClampMode(); // batch-invariant
+
+	VertexKickCursor c;
+	c.Load(*this);
+
+	GSVector4i m0, m1;
+	for (u32 p = 0; p < periods; p++)
+	{
+		const GIFPackedReg* RESTRICT base = r + p * period;
+
+		for (u32 j = 0; j < count; j++)
+		{
+			const GIFShapeVertex& v = m_packed_plan.vertices[j];
+			GSVertexKernels::ParsePlannedVertex(base, v, carry, m0, m1);
+			ApplyDepthClampMode(depth_clamp, m1.U32[1]);
+
+			const GIFPackedReg* RESTRICT pos = base + v.off;
+			if (v.IsXYZF())
+				VertexKickDirect<prim, false>(v.IsADC() || pos->XYZF2.Skip(), pos->XYZF2.X, pos->XYZF2.Y, m0, m1, c);
+			else
+				VertexKickDirect<prim, false>(v.IsADC() || pos->XYZ2.Skip(), pos->XYZ2.X, pos->XYZ2.Y, m0, m1, c);
+		}
+	}
+
+	c.Store();
+	m_v.m[0] = m0;
+	m_v.m[1] = m1;
+}
+
+// And the staged run behind it, for the same reason KickPackedStagedRun exists:
+// HandleAutoFlush reads the incoming vertex out of m_v, so an auto_flush
+// instantiation has to write it there and kick from there.
+template <u32 prim>
+__noinline void GSState::KickPlannedStagedRun(const GIFPackedReg* RESTRICT r, u32 periods)
+{
+	const u32 period = m_packed_plan.period;
+	const u32 count = m_packed_plan.count;
+
+	for (u32 p = 0; p < periods; p++)
+	{
+		const GIFPackedReg* RESTRICT base = r + p * period;
+
+		for (u32 j = 0; j < count; j++)
+		{
+			const GIFShapeVertex& v = m_packed_plan.vertices[j];
+
+			GSVertexKernels::PlanCarry carry;
+			carry.m0 = GSVector4i(m_v.m[0]);
+			carry.q = GSVector4i::load(std::bit_cast<int>(m_q));
+			std::memcpy(&carry.uvfog, &m_v.UV, sizeof(carry.uvfog));
+
+			GSVector4i m0, m1;
+			GSVertexKernels::ParsePlannedVertex(base, v, carry, m0, m1);
+			m_v.m[0] = m0;
+			m_v.m[1] = m1;
+
+			const GIFPackedReg* RESTRICT pos = base + v.off;
+			if (v.IsXYZF())
+				VertexKick<prim, true>(v.IsADC() || pos->XYZF2.Skip());
+			else
+				VertexKick<prim, true>(v.IsADC() || pos->XYZ2.Skip());
+		}
+	}
+}
+
 void GSState::GIFRegHandlerNull(const GIFReg* RESTRICT r)
 {
 }
@@ -5115,6 +5258,18 @@ void GSState::Transfer(const u8* mem, u32 size)
 									m_packed_layout = path.layout;
 							}
 
+							// A shape SetTag could not name, on a prim that has a
+							// planned handler: reduce the descriptor list and take
+							// it if it reduces. Once per tag, and an A+D -- which is
+							// what most of what gets here carries -- stops the
+							// reduction on the descriptor it sits at.
+							if (!fused && m_fpGIFPackedRegHandlerPlanC &&
+								GIFBuildShapePlan(path.regs, path.nreg, m_packed_plan))
+							{
+								fused = m_fpGIFPackedRegHandlerPlanC;
+								m_packed_regs = path.regs;
+							}
+
 							if (fused)
 							{
 								(this->*fused)((GIFPackedReg*)mem, total);
@@ -5601,6 +5756,8 @@ void GSState::UpdateVertexKick()
 
 	for (u32 i = 0; i < GIF_REG_COMPLEX_COUNT - 2; i++)
 		m_fpGIFPackedRegHandlersLayoutC[i] = m_fpGIFPackedRegHandlerLayout[i][prim];
+
+	m_fpGIFPackedRegHandlerPlanC = m_fpGIFPackedRegHandlerPlan[prim];
 }
 
 void GSState::GrowVertexBuffer()

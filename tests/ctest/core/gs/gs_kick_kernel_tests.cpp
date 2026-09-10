@@ -392,6 +392,38 @@ namespace
 			}
 		}
 
+		// The planned handler, with the plan built the way Transfer builds it.
+		// Returns false when the shape does not reduce to a plan, which is the
+		// case Transfer leaves on the per-qword replay.
+		template <u32 prim>
+		void KickPlanCall(const GIFPackedReg* r, u32 size)
+		{
+			if (m_auto_flush_arm)
+				GIFPackedRegHandlerPlan<prim, true>(r, size);
+			else
+				GIFPackedRegHandlerPlan<prim, false>(r, size);
+		}
+
+		bool KickPlanCallDyn(u32 prim, const GIFPackedReg* r, u32 size, const std::vector<u8>& descs)
+		{
+			GSVector4i regs = GSVector4i::zero();
+			for (size_t i = 0; i < descs.size(); i++)
+				regs.U8[i] = descs[i] & 0xF;
+
+			if (!GIFBuildShapePlan(regs, static_cast<u32>(descs.size()), m_packed_plan))
+				return false;
+			m_packed_regs = regs;
+
+			switch (prim)
+			{
+				case GS_TRIANGLESTRIP: KickPlanCall<GS_TRIANGLESTRIP>(r, size); break;
+				case GS_TRIANGLELIST: KickPlanCall<GS_TRIANGLELIST>(r, size); break;
+				case GS_SPRITE: KickPlanCall<GS_SPRITE>(r, size); break;
+				default: return false;
+			}
+			return true;
+		}
+
 		// Whether this build instantiates a handler for the pair, so a test
 		// drives exactly the pairs that ship. GSState::LayoutHandlerExists is the
 		// one source of truth; this only reaches it.
@@ -443,6 +475,12 @@ namespace
 		}
 
 		using GSState::UnpublishLayoutHandlers;
+
+		// Transfer fills both of these just before it dispatches the planned
+		// handler, and nothing else writes them, so a test driving a whole packet
+		// can tell whether the dispatch reached it.
+		using GSState::m_packed_plan;
+		using GSState::m_packed_regs;
 
 		// The routing predicate itself, so a test can assert which case it is
 		// driving instead of assuming the context it built produces it.
@@ -2444,4 +2482,449 @@ TEST(GsKickKernel, LayoutsMatchThroughTransferWithDrawBuffering)
 			}
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The planned handler: shapes SetTag cannot name, against the per-qword replay.
+//
+// Same comparison as the layouts above, over a wider set of shapes -- several
+// vertices to a period, a fog descriptor, the two no-draw positions, a write
+// after the period's last vertex -- because the handler reads its shape out of a
+// GIFShapePlan instead of being instantiated for one.
+// ---------------------------------------------------------------------------
+namespace
+{
+	bool DescIsPosition(u8 d)
+	{
+		return d == GIF_REG_XYZF2 || d == GIF_REG_XYZ2 || d == GIF_REG_XYZF3 || d == GIF_REG_XYZ3;
+	}
+
+	u32 PositionsPerPeriod(const std::vector<u8>& descs)
+	{
+		return static_cast<u32>(std::count_if(descs.begin(), descs.end(), DescIsPosition));
+	}
+
+	// One qword of any descriptor a plan can hold. A qword the plan says nothing
+	// reads gets a changing pattern rather than zeroes, so a parse that reads one
+	// gets a number the stream produces nowhere else.
+	void EncodePlannedQword(GIFPackedReg* r, u8 desc, const VertexSpec& v, u32 filler)
+	{
+		std::memset(r, 0, sizeof(*r));
+		switch (desc)
+		{
+			case GIF_REG_STQ:
+				std::memcpy(&r->U32[0], &v.s, sizeof(float));
+				std::memcpy(&r->U32[1], &v.t, sizeof(float));
+				std::memcpy(&r->U32[2], &v.q, sizeof(float));
+				break;
+			case GIF_REG_RGBA:
+				r->U32[0] = (v.rgba >> 0) & 0xFF;
+				r->U32[1] = (v.rgba >> 8) & 0xFF;
+				r->U32[2] = (v.rgba >> 16) & 0xFF;
+				r->U32[3] = (v.rgba >> 24) & 0xFF;
+				break;
+			case GIF_REG_UV:
+				r->U32[0] = v.uv_u;
+				r->U32[1] = v.uv_v;
+				break;
+			case GIF_REG_FOG:
+				r->U32[3] = (v.fog & 0xFF) << 4;
+				break;
+			case GIF_REG_XYZF2:
+			case GIF_REG_XYZF3:
+				r->U32[0] = v.x;
+				r->U32[1] = v.y;
+				r->U32[2] = (v.z & 0x00FFFFFF) << 4;
+				r->U32[3] = (v.fog & 0xFF) << 4;
+				if (v.adc)
+					r->U32[3] |= 0x8000;
+				break;
+			case GIF_REG_XYZ2:
+			case GIF_REG_XYZ3:
+				r->U32[0] = v.x;
+				r->U32[1] = v.y;
+				r->U32[2] = v.z;
+				if (v.adc)
+					r->U32[3] |= 0x8000;
+				break;
+			default:
+				r->U32[0] = filler;
+				r->U32[1] = ~filler;
+				r->U32[2] = filler ^ 0xDEADBEEFu;
+				r->U32[3] = filler * 2654435761u;
+				break;
+		}
+	}
+
+	// A latch descriptor belongs to the next position after it; the ones past the
+	// period's last position belong to no vertex of it at all, and take the last
+	// one's fields so they are still well formed.
+	std::vector<GIFPackedReg> EncodePlannedStream(const std::vector<u8>& descs,
+		const std::vector<VertexSpec>& verts, u32 vpp, u32 periods)
+	{
+		const size_t period = descs.size();
+		std::vector<GIFPackedReg> out(periods * period);
+
+		for (u32 p = 0; p < periods; p++)
+		{
+			u32 vi = 0;
+			for (size_t i = 0; i < period; i++)
+			{
+				const VertexSpec& v = verts[p * vpp + std::min(vi, vpp - 1)];
+				EncodePlannedQword(&out[p * period + i], descs[i], v,
+					static_cast<u32>(p * period + i) * 0x9E3779B9u + 1u);
+				if (DescIsPosition(descs[i]))
+					vi++;
+			}
+		}
+		return out;
+	}
+
+	std::string ShapeName(const std::vector<u8>& descs)
+	{
+		std::string s = std::to_string(descs.size()) + ":";
+		for (size_t i = 0; i < descs.size(); i++)
+			s += (i ? "," : "") + std::string(1, "0123456789abcdef"[descs[i] & 0xF]);
+		return s;
+	}
+
+	// Periods compared, or zero when the shape does not plan or the prim has no
+	// planned handler -- neither of which is a failure: that tag stays on the
+	// per-qword replay, which is the arm this compares against.
+	u32 RunAndComparePlan(const KickSetup& setup, u32 prim, const std::vector<u8>& descs,
+		const std::vector<VertexSpec>& verts, const std::vector<u32>& call_periods,
+		bool auto_flush_arm = false, bool draw_moves_environment = false)
+	{
+		if (prim != GS_TRIANGLESTRIP && prim != GS_TRIANGLELIST && prim != GS_SPRITE)
+			return 0;
+
+		const u32 vpp = PositionsPerPeriod(descs);
+		if (vpp == 0)
+			return 0;
+
+		GSVector4i regs = GSVector4i::zero();
+		for (size_t i = 0; i < descs.size(); i++)
+			regs.U8[i] = descs[i] & 0xF;
+		GIFShapePlan plan = {};
+		if (!GIFBuildShapePlan(regs, static_cast<u32>(descs.size()), plan))
+			return 0;
+
+		const u32 period = static_cast<u32>(descs.size());
+		const u32 periods = static_cast<u32>(verts.size()) / vpp;
+		if (periods == 0)
+			return 0;
+
+		const DrawBufferingGuard guard(setup.draw_buffering);
+		const AutoFlushGuard af_guard(setup.autoflush);
+		const std::vector<GIFPackedReg> stream = EncodePlannedStream(descs, verts, vpp, periods);
+
+		auto run = [&](bool fused) {
+			auto p = MakeProbe(setup, prim, true);
+			p->m_draw_moves_environment = draw_moves_environment;
+			p->m_auto_flush_arm = auto_flush_arm;
+			SeedLatchedState(*p);
+
+			u32 k = 0;
+			auto one = [&](u32 take) {
+				if (fused)
+					EXPECT_TRUE(p->KickPlanCallDyn(prim, &stream[k * period], take * period, descs));
+				else
+					p->ReplayPerQword(descs, &stream[k * period], take * period);
+				k += take;
+			};
+			for (u32 n : call_periods)
+			{
+				if (k >= periods)
+					break;
+				one(std::min<u32>(n, periods - k));
+			}
+			if (k < periods)
+				one(periods - k);
+			return p;
+		};
+
+		auto replay = run(false);
+		auto planned = run(true);
+		ExpectSameKickResult(*replay, *planned);
+		return periods;
+	}
+
+	// The shapes the Sly 3 census left on the replay that carry no register
+	// write, beside ones that exercise what a plan can say and a GIFPackedLayout
+	// cannot.
+	const std::vector<std::vector<u8>> kPlannedShapes = {
+		{1, 4},                      // {RGBAQ, XYZF2}: the XYZF2 twin
+		{3, 4},                      // {UV, XYZF2}, off the sprite stream
+		{2, 4},                      // {ST, XYZF2}
+		{5},                         // a bare position
+		{4, 4},                      // two vertices, nothing else
+		{2, 1, 4, 2, 4, 2, 4, 2, 4}, // four vertices, one colour between them
+		{2, 1, 4, 0xF, 2, 4},        // two vertices, NOP padded
+		{1, 4, 1, 4},                // a colour of its own per vertex
+		{0xA, 5},                    // {FOG, XYZ2}
+		{4, 5},                      // an XYZF2 leaving its fog to an XYZ2
+		{2, 1, 3, 0xA, 5},           // every latch descriptor at once
+		{2, 1, 4, 2},                // a trailing ST the next period overwrites
+		{0xC, 0xD},                  // the two positions that draw nothing
+	};
+} // namespace
+
+TEST(GsKickKernel, PlannedShapesMatchThePerQwordPath)
+{
+	u32 seed = 12100;
+	u32 compared = 0;
+
+	for (const std::vector<u8>& descs : kPlannedShapes)
+	{
+		for (u32 prim : {GS_TRIANGLESTRIP, GS_TRIANGLELIST, GS_SPRITE})
+		{
+			for (AdcPattern adc : {AdcPattern::None, AdcPattern::Stuntman, AdcPattern::Katamari})
+			{
+				for (u32 len : {4u, 12u, 130u, 400u})
+				{
+					SCOPED_TRACE(::testing::Message() << ShapeName(descs) << " prim=" << prim
+					                                  << " adc=" << static_cast<int>(adc) << " len=" << len);
+					compared += RunAndComparePlan(KickSetup{}, prim, descs, MakeStream(len, adc, seed++), {len});
+					if (::testing::Test::HasFatalFailure() || ::testing::Test::HasNonfatalFailure())
+						return;
+				}
+			}
+		}
+	}
+
+	EXPECT_GT(compared, 10000u) << "the planned handler was never entered";
+}
+
+TEST(GsKickKernel, PlannedShapesMatchAcrossCallSplits)
+{
+	u32 seed = 12500;
+	u32 compared = 0;
+
+	for (const std::vector<u8>& descs : kPlannedShapes)
+	{
+		for (u32 chunk : {1u, 2u, 7u})
+		{
+			SCOPED_TRACE(::testing::Message() << ShapeName(descs) << " chunk=" << chunk);
+			const std::vector<u32> calls(60 / chunk + 1, chunk);
+			compared += RunAndComparePlan(KickSetup{}, GS_TRIANGLESTRIP, descs,
+				MakeStream(60, AdcPattern::Stuntman, seed++), calls);
+			if (::testing::Test::HasFatalFailure() || ::testing::Test::HasNonfatalFailure())
+				return;
+		}
+	}
+
+	EXPECT_GT(compared, 300u);
+}
+
+TEST(GsKickKernel, PlannedShapesMatchOnTheAutoFlushArm)
+{
+	u32 seed = 12700;
+	u32 compared = 0;
+
+	for (const std::vector<u8>& descs : kPlannedShapes)
+	{
+		for (u32 prim : {GS_TRIANGLESTRIP, GS_SPRITE})
+		{
+			for (bool live : {false, true})
+			{
+				const KickSetup s = live ? AutoFlushLiveSetup() : AutoFlushInertSetup();
+				SCOPED_TRACE(::testing::Message() << ShapeName(descs) << " prim=" << prim << " live=" << live);
+				compared += RunAndComparePlan(s, prim, descs, MakeStream(80, AdcPattern::Stuntman, seed++),
+					{80}, true);
+				if (::testing::Test::HasFatalFailure() || ::testing::Test::HasNonfatalFailure())
+					return;
+			}
+		}
+	}
+
+	EXPECT_GT(compared, 500u);
+}
+
+// A draw inside the run that moves the scissor and the offset, which is what
+// makes the environment the rest of the run is decided against change under it.
+TEST(GsKickKernel, PlannedShapesPickUpAnEnvironmentMovingUnderTheRun)
+{
+	u32 seed = 12900;
+	u32 compared = 0;
+
+	for (const std::vector<u8>& descs : kPlannedShapes)
+	{
+		SCOPED_TRACE(ShapeName(descs));
+		compared += RunAndComparePlan(KickSetup{}, GS_TRIANGLESTRIP, descs,
+			MakeStream(300, AdcPattern::None, seed++), {300}, false, true);
+		if (::testing::Test::HasFatalFailure() || ::testing::Test::HasNonfatalFailure())
+			return;
+	}
+
+	EXPECT_GT(compared, 1000u);
+}
+
+// Random shapes, which is the point of a handler that is not instantiated per
+// shape: the set above is the one a census happened to find.
+TEST(GsKickKernel, RandomPlannedShapesMatchThePerQwordPath)
+{
+	// Weighted so a period usually holds at least one position and often more
+	// than one; NOP twice over because that is how the padded shapes are spelled.
+	const u8 alphabet[] = {GIF_REG_RGBA, GIF_REG_STQ, GIF_REG_UV, GIF_REG_FOG, GIF_REG_XYZF2,
+		GIF_REG_XYZ2, GIF_REG_XYZF2, GIF_REG_XYZ2, GIF_REG_XYZF3, GIF_REG_XYZ3, GIF_REG_NOP,
+		GIF_REG_NOP};
+	const u32 prims[] = {GS_TRIANGLESTRIP, GS_TRIANGLELIST, GS_SPRITE};
+	const AdcPattern adcs[] = {AdcPattern::None, AdcPattern::Stuntman, AdcPattern::Katamari};
+
+	std::mt19937 rng(0xC0FFEEu);
+	u32 seed = 13100;
+	u32 shapes = 0, compared = 0;
+
+	for (int iter = 0; iter < 1200; iter++)
+	{
+		const u32 nreg = 1 + rng() % 9;
+		std::vector<u8> descs(nreg);
+		for (u8& d : descs)
+			d = alphabet[rng() % std::size(alphabet)];
+
+		const u32 prim = prims[rng() % std::size(prims)];
+		const AdcPattern adc = adcs[rng() % std::size(adcs)];
+		const u32 len = 1 + rng() % 200;
+
+		SCOPED_TRACE(::testing::Message() << ShapeName(descs) << " prim=" << prim << " len=" << len);
+		const u32 n = RunAndComparePlan(KickSetup{}, prim, descs, MakeStream(len, adc, seed++), {len});
+		compared += n;
+		shapes += (n != 0);
+		if (::testing::Test::HasFatalFailure() || ::testing::Test::HasNonfatalFailure())
+			return;
+	}
+
+	EXPECT_GT(shapes, 300u) << "too few random shapes reduced to a plan to be a test of one";
+	EXPECT_GT(compared, 5000u);
+}
+
+// The dispatch, not just the handler: a whole GIF packet through Transfer, with
+// the planned handler published and with it withdrawn. Nothing else drives
+// SetTag, the type test and the plan build as one thing.
+namespace
+{
+	// Whether the shape reached the planned handler, so a caller can tell a shape
+	// that agreed from one that was never dispatched.
+	bool RunAndComparePlannedPacket(const KickSetup& setup, u32 prim, const std::vector<u8>& descs,
+		const std::vector<VertexSpec>& verts, u32 periods_per_tag, bool reg_writes)
+	{
+		const u32 vpp = PositionsPerPeriod(descs);
+		if (vpp == 0)
+			return false;
+
+		GSVector4i regs = GSVector4i::zero();
+		for (size_t i = 0; i < descs.size(); i++)
+			regs.U8[i] = descs[i] & 0xF;
+		GIFShapePlan plan = {};
+		if (!GIFBuildShapePlan(regs, static_cast<u32>(descs.size()), plan))
+			return false;
+
+		// A tag SetTag already names is dispatched by name, so it is not what this
+		// drives.
+		GIFPath named = {};
+		const GIFTag probe_tag = MakePackedTag(descs, 1);
+		named.SetTag(&probe_tag);
+		if (named.type != GIFPath::TYPE_UNKNOWN)
+			return false;
+
+		const u32 periods = static_cast<u32>(verts.size()) / vpp;
+		if (periods == 0)
+			return false;
+		const std::vector<GIFPackedReg> body = EncodePlannedStream(descs, verts, vpp, periods);
+
+		std::vector<GIFPackedReg> packet;
+		for (u32 p = 0, n = 0; p < periods; p += periods_per_tag, n++)
+		{
+			const u32 take = std::min(periods_per_tag, periods - p);
+			if (reg_writes && (n & 1))
+			{
+				// XYOFFSET on the live context, alternating, which is a register
+				// TestDrawChanged reacts to -- so m_dirty_gs_regs is live when the
+				// next tag starts and the handler owes the per-qword replay.
+				AppendRegWrite(packet, 0x18, (n & 2) ? 0u : 0x0000002000000010ull);
+			}
+			AppendTag(packet, descs, take);
+			packet.insert(packet.end(), body.begin() + p * descs.size(),
+				body.begin() + (p + take) * descs.size());
+		}
+
+		const DrawBufferingGuard guard(setup.draw_buffering);
+		const AutoFlushGuard af_guard(setup.autoflush);
+
+		auto run = [&](bool publish) {
+			auto p = MakeProbe(setup, prim, true);
+			SeedLatchedState(*p);
+			if (!publish)
+				p->UnpublishLayoutHandlers();
+			p->FeedPacketPath3(packet.data(), static_cast<u32>(packet.size()));
+			return p;
+		};
+
+		auto replay = run(false);
+		auto planned = run(true);
+		ExpectSameKickResult(*replay, *planned);
+
+		EXPECT_EQ(planned->m_packed_regs.U64[0], regs.U64[0])
+			<< "Transfer did not build a plan for this tag";
+		EXPECT_EQ(static_cast<int>(planned->m_packed_plan.count), static_cast<int>(plan.count));
+		EXPECT_EQ(replay->m_packed_regs.U64[0], 0u)
+			<< "the withdrawn arm built a plan, so it is not the replay";
+		return true;
+	}
+} // namespace
+
+TEST(GsKickKernel, PlannedShapesThroughTransfer)
+{
+	u32 seed = 13500;
+	u32 shapes = 0;
+
+	for (const std::vector<u8>& descs : kPlannedShapes)
+	{
+		for (u32 prim : {GS_TRIANGLESTRIP, GS_SPRITE})
+		{
+			for (bool reg_writes : {false, true})
+			{
+				SCOPED_TRACE(::testing::Message()
+				             << ShapeName(descs) << " prim=" << prim << " regs=" << reg_writes);
+				shapes += RunAndComparePlannedPacket(KickSetup{}, prim, descs,
+					MakeStream(240, AdcPattern::Stuntman, seed++), 8, reg_writes);
+				if (::testing::Test::HasFatalFailure() || ::testing::Test::HasNonfatalFailure())
+					return;
+			}
+		}
+	}
+
+	EXPECT_GT(shapes, 20u) << "no shape reached the planned handler through Transfer";
+}
+
+// Draw buffering on, with register writes between the tags, so m_dirty_gs_regs
+// is live when one starts. That is the shape the layout handlers owe their
+// per-qword replay to -- the flush point the fused arm collapses into one call
+// is only exact once the flag has cleared -- and the planned handler owes it for
+// the same reason.
+TEST(GsKickKernel, PlannedShapesMatchWithDrawBuffering)
+{
+	u32 seed = 13900;
+	u32 shapes = 0;
+
+	for (const std::vector<u8>& descs : kPlannedShapes)
+	{
+		for (u32 prim : {GS_TRIANGLESTRIP, GS_SPRITE})
+		{
+			for (u32 per_tag : {3u, 8u, 31u})
+			{
+				KickSetup s;
+				s.draw_buffering = true;
+				s.tme = 1;
+				SCOPED_TRACE(::testing::Message()
+				             << ShapeName(descs) << " prim=" << prim << " per_tag=" << per_tag);
+				shapes += RunAndComparePlannedPacket(s, prim, descs,
+					MakeStream(200, AdcPattern::Stuntman, seed++), per_tag, true);
+				if (::testing::Test::HasFatalFailure() || ::testing::Test::HasNonfatalFailure())
+					return;
+			}
+		}
+	}
+
+	EXPECT_GT(shapes, 30u);
 }

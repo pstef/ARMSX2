@@ -211,6 +211,7 @@ protected:
 	{
 		for (GIFPackedRegHandlerC& e : m_fpGIFPackedRegHandlersLayoutC)
 			e = nullptr;
+		m_fpGIFPackedRegHandlerPlanC = nullptr;
 	}
 
 	// Executor-owned HOST->LOCAL write cursor (advanced by wi() across transfer
@@ -388,6 +389,11 @@ protected:
 	template<u32 prim, GSVertexKernels::PackedLayout layout> void KickPackedOneStaged(const GIFPackedReg* RESTRICT rv);
 	template<u32 prim, GSVertexKernels::PackedLayout layout> void KickPackedStagedRun(const GIFPackedReg* RESTRICT r, u32 count);
 	template<u32 prim, GSVertexKernels::PackedLayout layout> void KickPackedOneLegacy(const GIFPackedReg* RESTRICT rv, u64 uvfog, GSLimit24BitDepth depth_clamp);
+	// And every shape none of those names, through one handler that reads the
+	// shape out of a GIFShapePlan instead of taking it as a template parameter.
+	template<u32 prim, bool auto_flush> void GIFPackedRegHandlerPlan(const GIFPackedReg* RESTRICT r, u32 size);
+	template<u32 prim> void KickPlannedBatch(const GIFPackedReg* RESTRICT r, u32 periods);
+	template<u32 prim> void KickPlannedStagedRun(const GIFPackedReg* RESTRICT r, u32 periods);
 	template<u32 prim> bool KickKernelApplies();
 	// Which (prim, layout) pairs stage 3c instantiates a fused handler for.
 	//
@@ -935,12 +941,24 @@ public:
 	// publishes the live prim's column into the table above.
 	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerLayout[GIF_REG_COMPLEX_COUNT - 2][8] = {};
 
+	// The planned handler for the live prim, and the per-prim column
+	// UpdateVertexKick publishes it from. Null for a prim that has no fused
+	// handler at all, which is what keeps Transfer's replay for those.
+	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerPlanC = nullptr;
+	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerPlan[8] = {};
+
 	// The live tag's descriptor offsets, copied out of the GIFPath by Transfer
 	// just before it calls one of those. The handler signature is fixed by the
 	// table it is called through, and the two contiguous triple layouts never read
 	// this, so it costs one 16-byte copy per NOP-padded or two-register tag and
 	// nothing at all on the shipped path.
 	GIFPackedLayout m_packed_layout = {3, 0, 1, 2};
+
+	// And the live tag's plan and descriptor list, which Transfer builds for a tag
+	// SetTag could not name. Beside m_packed_layout for the reason above: the plan
+	// is over a hundred bytes and nothing but the planned handler reads it.
+	GIFShapePlan m_packed_plan = {};
+	GSVector4i m_packed_regs = GSVector4i::zero();
 
 	// LAST IN THE CLASS ON PURPOSE, and it must stay last. This is 2 KB of scratch
 	// that only the kernel touches. Declared anywhere else it pushes every member
