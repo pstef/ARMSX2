@@ -99,6 +99,14 @@ constexpr const char* kMt6895BoardHints2026_09_03 =
 	"ro.soc.manufacturer=Mediatek | ro.soc.model=MT6895 | ro.board.platform=mt6895 | "
 	"ro.hardware=mt6895 | ro.product.board=k6895v1_64";
 
+// Boards whose vendor is not the GPU's. Every rule in the table is reached through the family, so
+// the family is the first thing that has to be right, and these are the strings that can talk it
+// out of the renderer string: a Qualcomm board is where a Mali or a PowerVR part is most likely to
+// be mistaken for an Adreno, and a MediaTek board is the mirror.
+constexpr const char* kQualcommBoardHints = "ro.soc.manufacturer=Qualcomm | ro.soc.model=SM8650 | "
+										   "ro.board.platform=kalama";
+constexpr const char* kQualcommLinuxBoardHints = "lenovo,thinkpad-x13s qcom,sc8280xp";
+
 bool DeniesRoaaDestinationRead(const GpuProfileSelection& sel)
 {
 	return sel.driver.HasBug(DriverBug::BrokenRoaaDestinationRead);
@@ -124,6 +132,47 @@ bool AutoPrefersVulkan(const char* vendor, const char* renderer, const char* ver
 	return GSUtil::AndroidAutoPrefersVulkan(vendor, renderer, version, platform_hints);
 }
 } // namespace
+
+// Which family the device is, before any rule is looked up. The hints carry the GPU's own strings
+// and the board's identity in one string, and the board names a vendor whether or not it made the
+// GPU: "qcom" is in the device tree of every Qualcomm machine, including the ones that a Mali or a
+// PowerVR part is plugged into and including the desktop this suite runs on. Deciding the family
+// from the whole string lets the board outvote the renderer, and the family decides every rule
+// after it -- so the device is handed another vendor's driver database entire, quietly, and every
+// test here answers for the machine it ran on instead of the device it names.
+TEST(GSGpuDriverProfile, TheRendererStringNamesTheFamilyAndTheBoardDoesNot)
+{
+	for (const char* board : {kQualcommBoardHints, kQualcommLinuxBoardHints})
+	{
+		const GpuProfileSelection mali = ResolveGL(kMaliR44p1GlVendor, kMaliR44p1GlRenderer,
+			kMaliR44p1GlVersion, board);
+		EXPECT_EQ(mali.runtime_profile, RuntimeGpuProfile::Mali) << board;
+		EXPECT_EQ(mali.driver.driver, MobileGpuDriver::ArmProprietary) << board;
+
+		const GpuProfileSelection powervr = ResolveGL("Imagination Technologies", "PowerVR B-Series BXM-8-256",
+			"OpenGL ES 3.2 build 1.19@6093188", board);
+		EXPECT_EQ(powervr.runtime_profile, RuntimeGpuProfile::PowerVR) << board;
+	}
+
+	// The mirror, so this is not read as a rule about Qualcomm boards: an Adreno on a MediaTek
+	// board is an Adreno, and the SoC vendor loses that one too.
+	const GpuProfileSelection adreno = ResolveGL("Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0676.0",
+		kMt6897AndroidHints);
+	EXPECT_EQ(adreno.runtime_profile, RuntimeGpuProfile::Adreno);
+}
+
+// The other direction, which is what stops the rule above from being enforced by deleting the
+// board from the question: a device whose graphics API names no family it recognises is still
+// placed by its board. The GL vendor and renderer strings are the ones that go missing -- a
+// pre-init probe, a wrapper that reports its own name -- and a Qualcomm board with no readable
+// renderer string is an Adreno for every purpose the database has.
+TEST(GSGpuDriverProfile, TheBoardStillNamesTheFamilyWhenTheGpuStringsDoNot)
+{
+	const GpuProfileSelection sel = ResolveGL("", "", "", kQualcommBoardHints);
+
+	EXPECT_EQ(sel.runtime_profile, RuntimeGpuProfile::Adreno);
+	EXPECT_EQ(sel.driver.driver, MobileGpuDriver::QualcommProprietary);
+}
 
 // The GL string carries the Arm driver revision in its vendor-specific tail ("v1.r44p1-..."), and
 // that tail -- not the leading GLES version -- is the ordered driver identity. Reading "3.2" out of

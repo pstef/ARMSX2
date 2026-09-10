@@ -120,16 +120,34 @@ static std::string GetDeviceTreeCompatible()
 }
 #endif
 
-static std::string BuildHints(std::string_view gpu_vendor, std::string_view gpu_renderer_or_name,
+/// The hints in their two kinds. What the graphics API says about the GPU and what the board says
+/// about itself answer different questions, and only the first one names the GPU: a Qualcomm board
+/// carries "qcom" whichever GPU is mounted on it, so a family test run over both together lets the
+/// SoC vendor outvote the renderer string.
+struct ProfileHints
+{
+	std::string device;
+	std::string platform;
+
+	std::string Join() const
+	{
+		std::string joined = device;
+		AppendHint(joined, std::string_view(), platform);
+		return joined;
+	}
+};
+
+static ProfileHints BuildHints(std::string_view gpu_vendor, std::string_view gpu_renderer_or_name,
 	const MobileDriverContext& driver_context)
 {
-	std::string hints;
-	AppendHint(hints, "gpu_vendor", gpu_vendor);
-	AppendHint(hints, "gpu", gpu_renderer_or_name);
-	AppendHint(hints, "driver_name", driver_context.driver_name);
-	AppendHint(hints, "driver_info", driver_context.driver_info);
-	AppendHint(hints, "api_version", driver_context.api_version_string);
-	AppendHint(hints, "platform", driver_context.platform_hints);
+	ProfileHints out;
+	AppendHint(out.device, "gpu_vendor", gpu_vendor);
+	AppendHint(out.device, "gpu", gpu_renderer_or_name);
+	AppendHint(out.device, "driver_name", driver_context.driver_name);
+	AppendHint(out.device, "driver_info", driver_context.driver_info);
+	AppendHint(out.device, "api_version", driver_context.api_version_string);
+
+	AppendHint(out.platform, "platform", driver_context.platform_hints);
 
 #if defined(__ANDROID__)
 	static constexpr const char* property_names[] = {
@@ -152,12 +170,27 @@ static std::string BuildHints(std::string_view gpu_vendor, std::string_view gpu_
 	};
 
 	for (const char* property_name : property_names)
-		AppendHint(hints, property_name, GetAndroidProperty(property_name));
+		AppendHint(out.platform, property_name, GetAndroidProperty(property_name));
 #elif defined(__linux__)
-	AppendHint(hints, "dt_compatible", GetDeviceTreeCompatible());
+	AppendHint(out.platform, "dt_compatible", GetDeviceTreeCompatible());
 #endif
 
-	return hints;
+	return out;
+}
+
+/// Which GPU family a hint string names, or Unknown if it names none. Adreno is asked first
+/// because its tokens are the broadest, so a string carrying two families resolves the way it
+/// always has.
+static RuntimeGpuProfile DetectFamily(std::string_view lowered_hints)
+{
+	if (GpuProfileDetail::LooksLikeAdreno(lowered_hints))
+		return RuntimeGpuProfile::Adreno;
+	if (GpuProfileDetail::LooksLikePowerVR(lowered_hints))
+		return RuntimeGpuProfile::PowerVR;
+	if (GpuProfileDetail::LooksLikeMali(lowered_hints))
+		return RuntimeGpuProfile::Mali;
+
+	return RuntimeGpuProfile::Unknown;
 }
 
 static bool LooksLikeMediaTekSoc(std::string_view lowered_hints)
@@ -401,8 +434,10 @@ GpuProfileSelection GpuProfileDetector::Resolve(std::string_view override_value,
 {
 	GpuProfileSelection selection;
 	selection.override_mode = ParseOverride(override_value);
-	selection.hints = BuildHints(gpu_vendor, gpu_renderer_or_name, driver_context);
+	const ProfileHints hints = BuildHints(gpu_vendor, gpu_renderer_or_name, driver_context);
+	selection.hints = hints.Join();
 	const std::string lowered_hints = GpuProfileDetail::ToLowerASCII(selection.hints);
+	const std::string lowered_device_hints = GpuProfileDetail::ToLowerASCII(hints.device);
 	const std::string lowered_override = GpuProfileDetail::ToLowerASCII(override_value);
 	selection.is_mediatek_soc = (lowered_override == "mediatek") || LooksLikeMediaTekSoc(lowered_hints);
 	selection.gs_tuning = GpuProfileDetail::MakeConservativeMobileGsTuning();
@@ -442,18 +477,21 @@ GpuProfileSelection GpuProfileDetector::Resolve(std::string_view override_value,
 		return finalize();
 	}
 
-	if (GpuProfileDetail::LooksLikeAdreno(lowered_hints))
-	{
-		ApplyResolvedProfile(selection, RuntimeGpuProfile::Adreno, GpuProfileDetail::ResolveAdrenoProfile(lowered_hints));
-	}
-	else if (GpuProfileDetail::LooksLikePowerVR(lowered_hints))
-	{
-		ApplyResolvedProfile(selection, RuntimeGpuProfile::PowerVR, GpuProfileDetail::ResolvePowerVRProfile(lowered_hints));
-	}
-	else if (GpuProfileDetail::LooksLikeMali(lowered_hints))
-	{
-		ApplyResolvedProfile(selection, RuntimeGpuProfile::Mali, GpuProfileDetail::ResolveMaliProfile(lowered_hints));
-	}
+	// The board identity is consulted only when the GPU's own strings name no family, so a device
+	// that could only ever be identified by its SoC still is, and one that names its GPU is not
+	// overruled by the chip it is mounted on.
+	RuntimeGpuProfile family = DetectFamily(lowered_device_hints);
+	if (family == RuntimeGpuProfile::Unknown)
+		family = DetectFamily(lowered_hints);
+
+	// The resolvers still read the whole string. Naming the family is the one question the board
+	// cannot be trusted with; nothing stops it from carrying the model number.
+	if (family == RuntimeGpuProfile::Adreno)
+		ApplyResolvedProfile(selection, family, GpuProfileDetail::ResolveAdrenoProfile(lowered_hints));
+	else if (family == RuntimeGpuProfile::PowerVR)
+		ApplyResolvedProfile(selection, family, GpuProfileDetail::ResolvePowerVRProfile(lowered_hints));
+	else if (family == RuntimeGpuProfile::Mali)
+		ApplyResolvedProfile(selection, family, GpuProfileDetail::ResolveMaliProfile(lowered_hints));
 
 	return finalize();
 }
