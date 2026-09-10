@@ -2660,6 +2660,8 @@ namespace
 		{4, 4},                      // two vertices, nothing else
 		{2, 1, 4, 2, 4, 2, 4, 2, 4}, // four vertices, one colour between them
 		{2, 1, 4, 0xF, 2, 4},        // two vertices, NOP padded
+		{2, 0xF, 1, 4},              // the NOP-padded triple, both spellings: the
+		{0xF, 2, 1, 4},              // shape a layout handler already ships for
 		{1, 4, 1, 4},                // a colour of its own per vertex
 		{0xA, 5},                    // {FOG, XYZ2}
 		{4, 5},                      // an XYZF2 leaving its fog to an XYZ2
