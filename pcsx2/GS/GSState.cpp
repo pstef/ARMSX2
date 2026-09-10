@@ -1962,6 +1962,109 @@ __noinline bool GIFClassifyPaddedLayout(const GSVector4i& regs, u32 nreg, u32& t
 	return false;
 }
 
+// One period of the descriptor list from `src`, which is left holding what the
+// period latched. Returns false on a descriptor that writes outside the vertex.
+static bool GIFRunShapePeriod(const GSVector4i& regs, u32 nreg, GIFShapeSources& src,
+	GIFShapeVertex* vertices, u8& count)
+{
+	count = 0;
+
+	for (u32 i = 0; i < nreg; i++)
+	{
+		const u8 d = regs.U8[i];
+		const u8 at = static_cast<u8>(i);
+
+		switch (d)
+		{
+			case GIF_REG_STQ:
+				// One qword feeds both m_v.ST and the Q latch, under different
+				// fix-ups. A vertex only ever sees that latch through a colour
+				// write, which is where the second field below is filled in.
+				src.st = at;
+				break;
+
+			case GIF_REG_RGBA:
+				src.rgba = at;
+				src.q = src.st;
+				break;
+
+			case GIF_REG_UV:
+				src.uv = at;
+				break;
+
+			case GIF_REG_FOG:
+				src.fog = at;
+				break;
+
+			case GIF_REG_XYZF2:
+			case GIF_REG_XYZF3:
+				// The F half of the position qword is the fog register: this
+				// vertex reads its own, and so does a later XYZ2, which keeps
+				// whatever fog stands. The XYZ forms below write no fog at all.
+				src.fog = at;
+				[[fallthrough]];
+
+			case GIF_REG_XYZ2:
+			case GIF_REG_XYZ3:
+				vertices[count].src = src;
+				vertices[count].off = at;
+				vertices[count].desc = d;
+				count++;
+				break;
+
+			case GIF_REG_NOP:
+			case GIF_REG_INVALID:
+				// Both reach GIFPackedRegHandlerNull.
+				break;
+
+			default:
+				return false;
+		}
+	}
+
+	return true;
+}
+
+bool GIFBuildShapePlan(const GSVector4i& regs, u32 nreg, GIFShapePlan& plan)
+{
+	constexpr GIFShapeSources carried = {GIF_SHAPE_CARRIED, GIF_SHAPE_CARRIED, GIF_SHAPE_CARRIED,
+		GIF_SHAPE_CARRIED, GIF_SHAPE_CARRIED};
+
+	plan.period = static_cast<u8>(nreg);
+	plan.count = 0;
+	plan.tail = carried;
+
+	GIFShapeSources src = carried;
+	if (!GIFRunShapePeriod(regs, nreg, src, plan.vertices, plan.count))
+	{
+		plan.status = GIFShapeStatus::Escape;
+		return false;
+	}
+	plan.tail = src;
+
+	if (plan.count == 0)
+	{
+		plan.status = GIFShapeStatus::NoVertex;
+		return false;
+	}
+
+	// The second period, from the first one's end state. The same descriptor list
+	// cannot reject here where it did not above.
+	GIFShapeVertex second[GIF_SHAPE_MAX_VERTICES];
+	u8 second_count = 0;
+	GIFRunShapePeriod(regs, nreg, src, second, second_count);
+
+	if (second_count != plan.count || src != plan.tail ||
+		!std::equal(plan.vertices, plan.vertices + plan.count, second))
+	{
+		plan.status = GIFShapeStatus::CrossPeriod;
+		return false;
+	}
+
+	plan.status = GIFShapeStatus::Ok;
+	return true;
+}
+
 void GSState::GIFPackedRegHandlerNull(const GIFPackedReg* RESTRICT r)
 {
 }

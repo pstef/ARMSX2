@@ -1134,6 +1134,82 @@ struct GIFPackedLayout
 // NOP, and SetTag is force-inlined into Transfer.
 __noinline bool GIFClassifyPaddedLayout(const GSVector4i& regs, u32 nreg, u32& type, GIFPackedLayout& layout);
 
+// ---------------------------------------------------------------------------
+// The descriptor list, reduced to what builds a vertex.
+//
+// A packed descriptor is one of three things. STQ, RGBAQ, UV and FOG each latch
+// a piece of the vertex; XYZF2, XYZ2, XYZF3 and XYZ3 complete one and draw it;
+// NOP and the unassigned 0x0b dispatch an empty handler, so their qword only
+// advances the pointer. What is left -- PRIM, the two TEX0s, the two CLAMPs and
+// A+D -- writes a GS register, which can move the environment the rest of the
+// run is decided against, so a tag carrying one gets no plan.
+//
+// A field the tag omits is not a missing field: the vertex keeps what the
+// previous write latched, which is what the per-qword path leaves in m_v. So one
+// period of NREG qwords is described by, for each vertex it builds, the qword
+// every field is read from or that the field is carried, plus what the period
+// leaves latched behind it.
+//
+// That is a description of the stream only if every period is alike, and a
+// period is not alike by construction: 2:4,2 reads its position before the ST
+// the period before it wrote. GIFBuildShapePlan runs the list twice, the second
+// time from the first run's end state, and rejects the tag when the two differ.
+// ---------------------------------------------------------------------------
+
+// NREG is at most 16 and a vertex costs a qword, so a period builds at most 16.
+inline constexpr u32 GIF_SHAPE_MAX_VERTICES = 16;
+// A field no write in the period reaches, which the vertex therefore inherits.
+inline constexpr u8 GIF_SHAPE_CARRIED = 0xFF;
+
+enum class GIFShapeStatus : u8
+{
+	Ok,
+	Escape,      // a descriptor that writes something other than the vertex
+	NoVertex,    // the period draws nothing
+	CrossPeriod, // a vertex reads a field the period before it wrote
+};
+
+// Where each field of a vertex comes from: a qword index inside the period, or
+// GIF_SHAPE_CARRIED.
+struct GIFShapeSources
+{
+	u8 st;   // m_v.ST
+	u8 q;    // m_v.RGBAQ.Q, which a colour write copies out of the Q latch -- so
+	         // an STQ after that write moves the latch but not this vertex
+	u8 rgba; // m_v.RGBAQ's colour bytes
+	u8 uv;   // m_v.UV
+	u8 fog;  // m_v.FOG
+
+	bool operator==(const GIFShapeSources&) const = default;
+};
+
+struct GIFShapeVertex
+{
+	GIFShapeSources src;
+	u8 off;  // the qword the position is in
+	u8 desc; // which of the four position descriptors it is
+
+	bool IsXYZF() const { return desc == GIF_REG_XYZF2 || desc == GIF_REG_XYZF3; }
+	bool IsADC() const { return desc == GIF_REG_XYZF3 || desc == GIF_REG_XYZ3; }
+
+	bool operator==(const GIFShapeVertex&) const = default;
+};
+
+struct GIFShapePlan
+{
+	GIFShapeStatus status;
+	u8 period; // qwords one period consumes: the tag's NREG
+	u8 count;  // vertices one period builds
+	GIFShapeVertex vertices[GIF_SHAPE_MAX_VERTICES];
+	GIFShapeSources tail; // what the period leaves latched, which is not the last
+	                      // vertex's own sources when a write follows it
+};
+
+// Fills `plan` for a packed tag's `nreg` descriptors and returns whether it came
+// out usable; plan.status says why not. Out of line for the same reason
+// GIFClassifyPaddedLayout is.
+__noinline bool GIFBuildShapePlan(const GSVector4i& regs, u32 nreg, GIFShapePlan& plan);
+
 struct alignas(32) GIFPath
 {
 	GIFTag tag;
