@@ -147,7 +147,11 @@ static ProfileHints BuildHints(std::string_view gpu_vendor, std::string_view gpu
 	AppendHint(out.device, "driver_info", driver_context.driver_info);
 	AppendHint(out.device, "api_version", driver_context.api_version_string);
 
-	AppendHint(out.platform, "platform", driver_context.platform_hints);
+	if (!driver_context.platform_hints.empty())
+	{
+		AppendHint(out.platform, "platform", driver_context.platform_hints);
+		return out;
+	}
 
 #if defined(__ANDROID__)
 	static constexpr const char* property_names[] = {

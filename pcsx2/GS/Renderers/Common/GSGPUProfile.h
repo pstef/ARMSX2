@@ -229,6 +229,11 @@ struct MobileDriverContext
 	/// reads these itself where the platform offers them (Android system properties, the Linux
 	/// device tree); a caller that already knows them, or a test pinning a specific device without
 	/// one, supplies them here and they are folded into the same hint string the rules match on.
+	///
+	/// Supplying them replaces the probe rather than adding to it. A caller naming the board is
+	/// stating which board this is, and appending the running machine's identity to that would
+	/// describe a device that does not exist -- two SoCs at once, whose rules then both fire. The
+	/// resolver would otherwise have to run on the part it is being asked about to answer for it.
 	std::string_view platform_hints;
 };
 

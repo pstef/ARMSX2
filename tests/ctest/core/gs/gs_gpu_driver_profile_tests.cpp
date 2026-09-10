@@ -38,8 +38,17 @@ constexpr u32 PackVulkanVersion(u32 major, u32 minor, u32 patch)
 	return (major << 22) | (minor << 12) | patch;
 }
 
+// The board every test speaks from unless it names another one. It has to be a string and not an
+// omitted argument: leaving the hints empty does not describe a device with no SoC, it declines to
+// describe one, and the resolver then fills the gap from the machine running the test -- which on
+// an Arm laptop or an Android handheld is a real SoC carrying real rules. A test written for "any
+// other part" would then be answering for the host, and the suite would pass or fail on where it
+// ran. This part is not one any rule keys on, so it is the "any other part" the tests mean.
+constexpr const char* kUnrelatedSocHints = "ro.soc.manufacturer=Acme | ro.soc.model=ACME1000 | "
+										   "ro.board.platform=acme1000";
+
 GpuProfileSelection ResolveGL(const char* vendor, const char* renderer, const char* version,
-	std::string_view platform_hints = std::string_view())
+	std::string_view platform_hints = kUnrelatedSocHints)
 {
 	MobileDriverContext context;
 	context.api = MobileGpuApi::OpenGL;
@@ -50,7 +59,7 @@ GpuProfileSelection ResolveGL(const char* vendor, const char* renderer, const ch
 }
 
 GpuProfileSelection ResolveMaliVK(const char* device_name, u32 packed_version,
-	std::string_view platform_hints = std::string_view())
+	std::string_view platform_hints = kUnrelatedSocHints)
 {
 	MobileDriverContext context;
 	context.api = MobileGpuApi::Vulkan;
@@ -127,7 +136,7 @@ bool DatabasePrefersVulkan(const GpuProfileSelection& sel)
 // lets the resolver read the system properties; the tests pass them so a device can be pinned from
 // a desktop.
 bool AutoPrefersVulkan(const char* vendor, const char* renderer, const char* version,
-	std::string_view platform_hints = std::string_view())
+	std::string_view platform_hints = kUnrelatedSocHints)
 {
 	return GSUtil::AndroidAutoPrefersVulkan(vendor, renderer, version, platform_hints);
 }
@@ -347,7 +356,7 @@ constexpr u32 kQualcommProprietaryDriverId = 8;
 constexpr u32 kAdrenoVendorId = 0x5143u;
 
 GpuProfileSelection ResolveAdrenoVK(const char* device_name, u32 driver_id, const char* driver_name,
-	u32 packed_version)
+	u32 packed_version, std::string_view platform_hints = kUnrelatedSocHints)
 {
 	MobileDriverContext context;
 	context.api = MobileGpuApi::Vulkan;
@@ -355,6 +364,7 @@ GpuProfileSelection ResolveAdrenoVK(const char* device_name, u32 driver_id, cons
 	context.driver_id = driver_id;
 	context.driver_version = packed_version;
 	context.driver_name = driver_name;
+	context.platform_hints = platform_hints;
 	return GpuProfileDetector::Resolve("auto", std::string_view(), device_name, context);
 }
 
