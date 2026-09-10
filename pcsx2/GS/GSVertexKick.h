@@ -76,10 +76,11 @@ namespace GSVertexKernels
 	// siblings in the fused handler's loop). A batch loop passes them in once.
 	struct PackedParseConsts
 	{
-		uint8x16_t pat_m0;   // {S, T, RGBA, Q}, shared by both layouts
-		uint8x16_t pat_m1;   // XYZF2: {X|Y<<16, Z, -, F}
-		uint8x16_t pat_xyz;  // XYZ2:  {X|Y<<16, Z32} into the low half
-		uint32x4_t q_fixup;  // Q == +0.0 rewrites to FLT_MIN
+		uint8x16_t pat_m0;     // {S, T, RGBA, Q}, shared by both layouts
+		uint8x16_t pat_m1;     // XYZF2: {X|Y<<16, Z, -, F}
+		uint8x16_t pat_xyz;    // XYZ2:  {X|Y<<16, Z32} into the low half
+		uint32x4_t q_fixup;    // Q == +0.0 rewrites to FLT_MIN
+		uint32x4_t q_nan_lane; // Q's lane, isolated before the NaN compare
 	};
 
 	__forceinline_odr PackedParseConsts MakePackedParseConsts()
@@ -88,12 +89,14 @@ namespace GSVertexKernels
 		alignas(16) static constexpr u8 pat_m1[16] = {0, 1, 4, 5, 24, 25, 26, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 28, 0xFF, 0xFF, 0xFF};
 		alignas(16) static constexpr u8 pat_xyz[16] = {0, 1, 4, 5, 8, 9, 10, 11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 		alignas(16) static constexpr u32 q_fixup[4] = {0, 0, 0, 0x00800000};
+		alignas(16) static constexpr u32 q_nan_lane[4] = {0, 0, 0, 0xFFFFFFFF};
 
 		PackedParseConsts k;
 		k.pat_m0 = vld1q_u8(pat_m0);
 		k.pat_m1 = vld1q_u8(pat_m1);
 		k.pat_xyz = vld1q_u8(pat_xyz);
 		k.q_fixup = vld1q_u32(q_fixup);
+		k.q_nan_lane = vld1q_u32(q_nan_lane);
 		return k;
 	}
 
@@ -380,15 +383,21 @@ namespace GSVertexKernels
 				// The second STQ fix-up: a NaN Q becomes FLT_MAX. pat_m0 puts Q in
 				// lane 3, so the compare's other three lanes -- S, T and the packed
 				// colour, any of which can carry a NaN bit pattern -- are masked
-				// out. FCMEQ is false for a NaN operand, so BIC of the lane mask
-				// with it leaves ones only in a lane 3 that is NaN, and BSL takes
-				// FLT_MAX there and the parsed bits everywhere else.
+				// out.
+				//
+				// The masking is applied to the operand, not to the compare's
+				// result. Zeroing the other three lanes makes them compare equal,
+				// so FCMEQ is false only for a NaN Q and the select needs no lane
+				// mask of its own. Restricting the result instead is the direct way
+				// to write it and costs five more instructions a vertex: asked for
+				// a vector that is zero except lane 3, clang stops emitting the BIC
+				// that would build it and assembles the lane by hand instead.
+				//
 				// See the portable branch above for why this layout needs it and
 				// the contiguous triples do not.
-				const float32x4_t f = vreinterpretq_f32_u32(v0);
-				const uint32x4_t q_lane = vsetq_lane_u32(0xFFFFFFFFu, vdupq_n_u32(0), 3);
-				const uint32x4_t q_is_nan = vbicq_u32(q_lane, vceqq_f32(f, f));
-				v0 = vbslq_u32(q_is_nan, vreinterpretq_u32_f32(vdupq_n_f32(FLT_MAX)), v0);
+				const uint32x4_t q_only = vandq_u32(v0, k.q_nan_lane);
+				const float32x4_t q_f = vreinterpretq_f32_u32(q_only);
+				v0 = vbslq_u32(vceqq_f32(q_f, q_f), v0, vreinterpretq_u32_f32(vdupq_n_f32(FLT_MAX)));
 
 				m0 = GSVector4i(vreinterpretq_s32_u32(v0));
 			}
