@@ -407,6 +407,8 @@ namespace
 					return LayoutShipsFor<GSVertexKernels::PackedLayout::PairUVXYZ2>(prim);
 				case GSVertexKernels::PackedLayout::PairRGBAQXYZ2:
 					return LayoutShipsFor<GSVertexKernels::PackedLayout::PairRGBAQXYZ2>(prim);
+				case GSVertexKernels::PackedLayout::SingleXYZF2:
+					return LayoutShipsFor<GSVertexKernels::PackedLayout::SingleXYZF2>(prim);
 				default: return false;
 			}
 		}
@@ -1742,6 +1744,36 @@ TEST(GifSetTag, NopPaddedTriples)
 	}
 }
 
+TEST(GifSetTag, PositionOnlyTags)
+{
+	// outrun-b's bare {XYZF2}, and Sly 3's NOP-padded spelling of the same
+	// vertex.
+	const GIFPath bare = ClassifyTag({4}, 9);
+	EXPECT_EQ(bare.type, static_cast<u32>(GIFPath::TYPE_XYZF2ONLY));
+	EXPECT_EQ(bare.nreg, 1u);
+	EXPECT_EQ(bare.nloop, 9u);
+	EXPECT_EQ(bare.layout.stride, 1u);
+	EXPECT_EQ(bare.layout.off_xyz, 0u);
+
+	const GIFPath padded = ClassifyTag({0xF, 0xF, 0xF, 4}, 9);
+	EXPECT_EQ(padded.type, static_cast<u32>(GIFPath::TYPE_XYZF2ONLY));
+	EXPECT_EQ(padded.nreg, 4u) << "a NOP-padded tag keeps its nreg";
+	EXPECT_EQ(padded.layout.stride, 4u);
+	EXPECT_EQ(padded.layout.off_xyz, 3u);
+
+	const GIFPath leading = ClassifyTag({4, 0xF}, 9);
+	EXPECT_EQ(leading.type, static_cast<u32>(GIFPath::TYPE_XYZF2ONLY));
+	EXPECT_EQ(leading.layout.stride, 2u);
+	EXPECT_EQ(leading.layout.off_xyz, 0u);
+
+	// A lone XYZ2 is not one of them, padded or bare.
+	EXPECT_EQ(ClassifyTag({5}).type, static_cast<u32>(GIFPath::TYPE_UNKNOWN));
+	EXPECT_EQ(ClassifyTag({0xF, 5}).type, static_cast<u32>(GIFPath::TYPE_UNKNOWN));
+	// Neither is a tag carrying no vertex descriptor at all.
+	EXPECT_EQ(ClassifyTag({0xF}).type, static_cast<u32>(GIFPath::TYPE_UNKNOWN));
+	EXPECT_EQ(ClassifyTag({0xF, 0xF}).type, static_cast<u32>(GIFPath::TYPE_UNKNOWN));
+}
+
 TEST(GifSetTag, NopPaddedPairs)
 {
 	// stuntman's 3:f,1,5 -- 4.8% of its packed qwords.
@@ -1776,7 +1808,6 @@ TEST(GifSetTag, LayoutsThatMustStayUnknown)
 		{0xE, 0xE, 0xE, 0xE, 0xE, 0xF, 0xF},         // mgs3
 		{0xF},                                       // outrun-b, mgs3
 		{5},                                         // spiderman3
-		{4},                                         // outrun-b
 	};
 	for (const std::vector<u8>& d : unknown)
 	{
@@ -1948,6 +1979,8 @@ namespace
 	const LayoutCase kPairUV = {"2:3,5", {3, 5}, {2, 0, 0, 1}, GSVertexKernels::PackedLayout::PairUVXYZ2};
 	const LayoutCase kPairRGBAQ = {"2:1,5", {1, 5}, {2, 0, 0, 1}, GSVertexKernels::PackedLayout::PairRGBAQXYZ2};
 	const LayoutCase kPairRGBAQNop = {"3:f,1,5", {0xF, 1, 5}, {3, 1, 0, 2}, GSVertexKernels::PackedLayout::PairRGBAQXYZ2};
+	const LayoutCase kSingleNop = {"4:f,f,f,4", {0xF, 0xF, 0xF, 4}, {4, 0, 0, 3}, GSVertexKernels::PackedLayout::SingleXYZF2};
+	const LayoutCase kSingleBare = {"1:4", {4}, {1, 0, 0, 0}, GSVertexKernels::PackedLayout::SingleXYZF2};
 } // namespace
 
 // The layouts against the per-qword path, over the whole prim / ADC / run-length
@@ -1979,6 +2012,10 @@ TEST(GsKickKernel, LayoutsMatchThePerQwordPath)
 						KickSetup{}, prim, kPairRGBAQ, v, {len}, use_kernel);
 					RunAndCompareLayout<GSVertexKernels::PackedLayout::PairRGBAQXYZ2>(
 						KickSetup{}, prim, kPairRGBAQNop, v, {len}, use_kernel);
+					RunAndCompareLayout<GSVertexKernels::PackedLayout::SingleXYZF2>(
+						KickSetup{}, prim, kSingleNop, v, {len}, use_kernel);
+					RunAndCompareLayout<GSVertexKernels::PackedLayout::SingleXYZF2>(
+						KickSetup{}, prim, kSingleBare, v, {len}, use_kernel);
 				}
 			}
 		}
@@ -2006,6 +2043,8 @@ TEST(GsKickKernel, LayoutsMatchAcrossCallSplits)
 				KickSetup{}, prim, kPairUV, v, calls);
 			RunAndCompareLayout<GSVertexKernels::PackedLayout::PairRGBAQXYZ2>(
 				KickSetup{}, prim, kPairRGBAQ, v, calls);
+			RunAndCompareLayout<GSVertexKernels::PackedLayout::SingleXYZF2>(
+				KickSetup{}, prim, kSingleNop, v, calls);
 		}
 	}
 }
@@ -2032,6 +2071,8 @@ TEST(GsKickKernel, LayoutsMatchOnTheAutoFlushArm)
 					s, prim, kPairUV, v, {len}, true, true);
 				RunAndCompareLayout<GSVertexKernels::PackedLayout::PairRGBAQXYZ2>(
 					s, prim, kPairRGBAQ, v, {len}, true, true);
+				RunAndCompareLayout<GSVertexKernels::PackedLayout::SingleXYZF2>(
+					s, prim, kSingleNop, v, {len}, true, true);
 			}
 		}
 	}
@@ -2080,6 +2121,8 @@ TEST(GsKickKernel, LayoutsPickUpAnEnvironmentMovingUnderTheRun)
 			s, prim, kPairRGBAQ, v, {5000}, true, false, true);
 		RunAndCompareLayout<GSVertexKernels::PackedLayout::NopTripleXYZF2>(
 			s, prim, kNopTriple52, v, {5000}, true, false, true);
+		RunAndCompareLayout<GSVertexKernels::PackedLayout::SingleXYZF2>(
+			s, prim, kSingleNop, v, {5000}, true, false, true);
 	}
 }
 
@@ -2284,7 +2327,8 @@ namespace
 TEST(GsKickKernel, TagFinishedByTheMidRecordResumeIsNotDispatched)
 {
 	u32 seed = 9900;
-	const LayoutCase* cases[] = {&kNopTriple40, &kNopTriple52, &kPairSTQ, &kPairUV, &kPairRGBAQ};
+	const LayoutCase* cases[] = {&kNopTriple40, &kNopTriple52, &kPairSTQ, &kPairUV, &kPairRGBAQ,
+		&kSingleNop};
 	for (const LayoutCase* lc : cases)
 	{
 		for (u32 prim : {GS_TRIANGLESTRIP, GS_SPRITE})
@@ -2329,7 +2373,7 @@ TEST(GsKickKernel, LayoutsMatchThroughTransfer)
 {
 	u32 seed = 9700;
 	const LayoutCase* cases[] = {&kNopTriple40, &kNopTriple41, &kNopTriple52, &kPairSTQ, &kPairUV,
-		&kPairRGBAQ, &kPairRGBAQNop};
+		&kPairRGBAQ, &kPairRGBAQNop, &kSingleNop, &kSingleBare};
 	for (const LayoutCase* lc : cases)
 	{
 		for (u32 prim : {GS_TRIANGLESTRIP, GS_SPRITE})
@@ -2385,7 +2429,7 @@ TEST(GsKickKernel, LayoutsMatchThroughTransferWithDrawBuffering)
 {
 	u32 seed = 9900;
 	const LayoutCase* cases[] = {&kNopTriple40, &kNopTriple41, &kPairSTQ, &kPairUV, &kPairRGBAQ,
-		&kPairRGBAQNop};
+		&kPairRGBAQNop, &kSingleNop, &kSingleBare};
 	for (const LayoutCase* lc : cases)
 	{
 		for (u32 prim : {GS_TRIANGLESTRIP, GS_SPRITE})

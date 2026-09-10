@@ -418,7 +418,9 @@ void GSState::SetPrimHandlers()
 	m_fpGIFPackedRegHandlerLayout[GIF_REG_UVXYZ2 - 2][P] = \
 		LayoutHandlerOrNull<P, GSVertexKernels::PackedLayout::PairUVXYZ2, auto_flush>(); \
 	m_fpGIFPackedRegHandlerLayout[GIF_REG_RGBAQXYZ2 - 2][P] = \
-		LayoutHandlerOrNull<P, GSVertexKernels::PackedLayout::PairRGBAQXYZ2, auto_flush>();
+		LayoutHandlerOrNull<P, GSVertexKernels::PackedLayout::PairRGBAQXYZ2, auto_flush>(); \
+	m_fpGIFPackedRegHandlerLayout[GIF_REG_XYZF2ONLY - 2][P] = \
+		LayoutHandlerOrNull<P, GSVertexKernels::PackedLayout::SingleXYZF2, auto_flush>();
 
 	SetHandlerXYZ(GS_POINTLIST, true);
 	SetHandlerXYZ(GS_LINELIST, non_sprite_af);
@@ -1927,8 +1929,10 @@ __noinline bool GIFClassifyPaddedLayout(const GSVector4i& regs, u32 nreg, u32& t
 	}
 
 	// The two-register layouts, NOP-padded. XYZF2 twins are deliberately not
-	// recognised: no corpus title carries one, and every recognised type costs an
-	// instantiation of the kernel, the staged loop and the per-vertex batch.
+	// recognised: every recognised type costs an instantiation of the kernel, the
+	// staged loop and the per-vertex batch, and the traffic does not pay for one.
+	// Sly 3 sends {RGBAQ, XYZF2}, at 0.27% of its packed registers -- under a
+	// third of the position-only tag below.
 	if (n == 2 && desc[1] == GIF_REG_XYZ2)
 	{
 		switch (desc[0])
@@ -1939,6 +1943,19 @@ __noinline bool GIFClassifyPaddedLayout(const GSVector4i& regs, u32 nreg, u32& t
 			default: return false;
 		}
 		layout = {nreg, pos[0], 0, pos[1]};
+		return true;
+	}
+
+	// A position-only tag, NOP-padded: Sly 3's 4:f,f,f,4, 0.9% of its packed
+	// registers. One descriptor, and the same argument as the pairs -- the
+	// fields it omits keep what the previous write latched. XYZ2 is not
+	// recognised beside it: the position-only XYZ2 tags in that scene arrive on
+	// TRIFAN and LINESTRIP, neither of which instantiates a handler, so the type
+	// would name a layout that goes back to the per-qword replay anyway.
+	if (n == 1 && desc[0] == GIF_REG_XYZF2)
+	{
+		type = GIFPath::TYPE_XYZF2ONLY;
+		layout = {nreg, 0, 0, pos[0]};
 		return true;
 	}
 
@@ -2712,10 +2729,6 @@ void GSState::GIFPackedRegHandlerLayout(const GIFPackedReg* RESTRICT r, u32 size
 	u32 done = 0;
 	if (m_dirty_gs_regs)
 	{
-		constexpr u32 reg_a = (layout == GSVertexKernels::PackedLayout::PairUVXYZ2) ?
-								  GIF_REG_UV :
-								  ((layout == GSVertexKernels::PackedLayout::PairRGBAQXYZ2) ? GIF_REG_RGBA :
-																							  GIF_REG_STQ);
 		constexpr u32 reg_xyz = GSVertexKernels::LayoutIsXYZF2(layout) ? GIF_REG_XYZF2 : GIF_REG_XYZ2;
 		const u32 off_a = m_packed_layout.off_a;
 		const u32 off_rgba = m_packed_layout.off_rgba;
@@ -2724,7 +2737,15 @@ void GSState::GIFPackedRegHandlerLayout(const GIFPackedReg* RESTRICT r, u32 size
 		while (done < count && m_dirty_gs_regs)
 		{
 			const GIFPackedReg* RESTRICT rv = r + done * stride;
-			ReplayPackedQword(reg_a, rv + off_a);
+			if constexpr (GSVertexKernels::LayoutCarriesA(layout))
+			{
+				constexpr u32 reg_a =
+					(layout == GSVertexKernels::PackedLayout::PairUVXYZ2) ?
+						GIF_REG_UV :
+						((layout == GSVertexKernels::PackedLayout::PairRGBAQXYZ2) ? GIF_REG_RGBA :
+																					GIF_REG_STQ);
+				ReplayPackedQword(reg_a, rv + off_a);
+			}
 			if constexpr (GSVertexKernels::LayoutIsTriple(layout))
 				ReplayPackedQword(GIF_REG_RGBA, rv + off_rgba);
 			ReplayPackedQword(reg_xyz, rv + off_xyz);

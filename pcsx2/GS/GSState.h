@@ -412,9 +412,11 @@ protected:
 		{
 			// outrun-a/-b and mgs3's NOP-padded triple, 13,900 handler calls
 			// across the corpus; spiderman3's and stuntman's {RGBAQ, XYZ2},
-			// 13,560.
+			// 13,560. Sly 3's position-only tag, 0.92% of the packed registers
+			// in one scene, against 92% for the triple above.
 			return layout == GSVertexKernels::PackedLayout::NopTripleXYZF2 ||
-				   layout == GSVertexKernels::PackedLayout::PairRGBAQXYZ2;
+				   layout == GSVertexKernels::PackedLayout::PairRGBAQXYZ2 ||
+				   layout == GSVertexKernels::PackedLayout::SingleXYZF2;
 		}
 		else if constexpr (prim == GS_SPRITE)
 		{

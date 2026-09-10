@@ -183,11 +183,13 @@ namespace GSVertexKernels
 		PairSTQXYZ2,    // {ST, XYZ2}: colour and Q carried
 		PairUVXYZ2,     // {UV, XYZ2}: ST, colour and Q carried
 		PairRGBAQXYZ2,  // {RGBAQ, XYZ2}: ST carried, Q from the latch
+		SingleXYZF2,    // {XYZF2}: everything but the position carried
 	};
 
 	constexpr bool LayoutIsXYZF2(PackedLayout l)
 	{
-		return l == PackedLayout::TripleXYZF2 || l == PackedLayout::NopTripleXYZF2;
+		return l == PackedLayout::TripleXYZF2 || l == PackedLayout::NopTripleXYZF2 ||
+			   l == PackedLayout::SingleXYZF2;
 	}
 	constexpr bool LayoutIsContiguousTriple(PackedLayout l)
 	{
@@ -205,6 +207,10 @@ namespace GSVertexKernels
 	}
 	// Whether the parse needs the carried m[0].
 	constexpr bool LayoutCarriesM0(PackedLayout l) { return !LayoutIsTriple(l); }
+	// Whether the record holds a descriptor at off_a. Every layout but the
+	// position-only one does, and the replay loop the fused handler runs while
+	// m_dirty_gs_regs is live has to skip a qword the tag does not contain.
+	constexpr bool LayoutCarriesA(PackedLayout l) { return l != PackedLayout::SingleXYZF2; }
 
 	template <PackedLayout L>
 	__forceinline_odr u32 LayoutStride(const GIFPackedLayout& o)
@@ -241,8 +247,8 @@ namespace GSVertexKernels
 
 	// The carried m[0] a pair layout parses against.
 	//
-	//   PairSTQ / PairUV  m_v.m[0] as it stands: lanes 2 and 3 are the colour and
-	//                     the vertex's own Q, neither of which such a tag writes.
+	//   PairSTQ, PairUV,  m_v.m[0] as it stands: lanes 2 and 3 are the colour and
+	//   SingleXYZF2       the vertex's own Q, neither of which such a tag writes.
 	//   PairRGBAQ         m_v.m[0] with LANE 2 SET TO THE LATCHED Q. That is not
 	//                     cosmetic: GIFPackedRegHandlerRGBA writes RGBAQ.Q = m_q,
 	//                     and putting m_q there lets the parse reuse the shipped
@@ -422,7 +428,10 @@ namespace GSVertexKernels
 			}
 			else
 			{
-				static_assert(L == PackedLayout::PairUVXYZ2);
+				// {UV, XYZ2} and the position-only tag write nothing m[0] holds
+				// -- a UV descriptor writes UV, and UV lives in m[1] -- so the
+				// carry is this vertex's m[0] whole.
+				static_assert(L == PackedLayout::PairUVXYZ2 || L == PackedLayout::SingleXYZF2);
 				m0 = carry;
 			}
 

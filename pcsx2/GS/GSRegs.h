@@ -76,7 +76,8 @@ enum GIF_REG_COMPLEX
 	GIF_REG_STQXYZ2 = 0x03,
 	GIF_REG_UVXYZ2 = 0x04,
 	GIF_REG_RGBAQXYZ2 = 0x05,
-	GIF_REG_COMPLEX_COUNT = 0x06,
+	GIF_REG_XYZF2ONLY = 0x06,
+	GIF_REG_COMPLEX_COUNT = 0x07,
 };
 
 enum GIF_A_D_REG
@@ -1113,13 +1114,13 @@ REG_SET_END
 // Where a fused packed layout's descriptors sit inside one record, in qwords.
 // The two contiguous {ST, RGBAQ, XYZ} layouts never read it -- their stride and
 // offsets are compile-time 3 / 0 / 1 / 2 -- so SetTag only fills it in for the
-// NOP-padded and the two-register layouts.
+// NOP-padded, the two-register and the position-only layouts.
 struct GIFPackedLayout
 {
 	u32 stride;
 	u32 off_a;    // ST for a triple; the pair's non-position descriptor otherwise
 	u32 off_rgba; // triple only
-	u32 off_xyz;
+	u32 off_xyz;  // the only one of the four a position-only layout reads
 };
 
 // A NOP descriptor dispatches GIFPackedRegHandlerNOP, which is empty, so a NOP
@@ -1158,6 +1159,7 @@ struct alignas(32) GIFPath
 		TYPE_STQXYZ2,
 		TYPE_UVXYZ2,
 		TYPE_RGBAQXYZ2,
+		TYPE_XYZF2ONLY,
 	};
 
 	static_assert(TYPE_STQRGBAXYZF2 - TYPE_STQRGBAXYZF2 == GIF_REG_STQRGBAXYZF2);
@@ -1166,6 +1168,7 @@ struct alignas(32) GIFPath
 	static_assert(TYPE_STQXYZ2 - TYPE_STQRGBAXYZF2 == GIF_REG_STQXYZ2);
 	static_assert(TYPE_UVXYZ2 - TYPE_STQRGBAXYZF2 == GIF_REG_UVXYZ2);
 	static_assert(TYPE_RGBAQXYZ2 - TYPE_STQRGBAXYZF2 == GIF_REG_RGBAQXYZ2);
+	static_assert(TYPE_XYZF2ONLY - TYPE_STQRGBAXYZF2 == GIF_REG_XYZF2ONLY);
 
 	__forceinline void SetTag(const void* mem)
 	{
@@ -1203,6 +1206,17 @@ struct alignas(32) GIFPath
 				switch (nreg)
 				{
 					case 1:
+						// A position-only tag: the vertex is the position and
+						// whatever the previous writes latched, which is the
+						// claim the two-register layouts below already rest on
+						// with one descriptor more. outrun-b sends it bare like
+						// this; Sly 3 pads it to nreg 4 with NOPs, and the
+						// classifier at the bottom takes that spelling.
+						if (regs.U32[0] == 0x00000004)
+						{
+							type = TYPE_XYZF2ONLY;
+							layout = {1, 0, 0, 0};
+						}
 						break;
 					case 2:
 						// {STQ, XYZ2}, {UV, XYZ2} and {RGBAQ, XYZ2}. A layout
