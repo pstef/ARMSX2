@@ -469,6 +469,97 @@ namespace GSVertexKernels
 #endif
 	}
 
+	// ------------------------------------------------------------------------
+	// The plan-driven parse: one vertex out of a period GIFBuildShapePlan
+	// described, with none of the shape known at compile time.
+	//
+	// It builds the same vertex out of the same sources as the layouts above --
+	// what changes is only that every offset is a value rather than a constant,
+	// and that a period can hold several vertices instead of one.
+	// ------------------------------------------------------------------------
+
+	// What a planned parse reads for the fields the tag does not write.
+	//
+	// All three are invariant over a run. A field one vertex of an accepted plan
+	// reads out of the stream is read out of the stream by every vertex -- were
+	// it otherwise, the period's first vertex would be reading what the period
+	// before it wrote, which is the case GIFBuildShapePlan turns away -- so a
+	// carried field is one no descriptor in the tag writes, and neither m_v nor
+	// the Q latch moves inside a batch.
+	struct PlanCarry
+	{
+		GSVector4i m0; // m_v.m[0]: {S, T, colour, Q}
+		GSVector4i q;  // the latched Q, in lane 0
+		u64 uvfog;     // m_v's {UV, FOG}
+	};
+
+	__forceinline_odr void ParsePlannedVertex(const GIFPackedReg* RESTRICT base, const GIFShapeVertex& v,
+		const PlanCarry& carry, GSVector4i& m0, GSVector4i& m1)
+	{
+		// m[0] = {S, T, colour, Q}, as two halves.
+		const GSVector4i lo = (v.src.st != GIF_SHAPE_CARRIED) ?
+                                  GSVector4i::loadl(&base[v.src.st].U64[0]) :
+                                  carry.m0;
+
+		GSVector4i hi;
+		if (v.src.rgba != GIF_SHAPE_CARRIED)
+		{
+			const GSVector4i rgba =
+				(GSVector4i::load<false>(&base[v.src.rgba]) & GSVector4i::x000000ff()).ps32().pu16();
+
+			GSVector4i q = carry.q;
+			if (v.src.q != GIF_SHAPE_CARRIED)
+			{
+				// GIFPackedRegHandlerSTQ's two fix-ups, which the colour write
+				// then copies into the vertex: a Q of +0.0 becomes FLT_MIN (an
+				// integer compare, so -0.0 passes) and a NaN becomes FLT_MAX.
+				q = GSVector4i::loadl(&base[v.src.q].U64[1]);
+				q = q.blend8(GSVector4i::cast(GSVector4(FLT_MIN)), q == GSVector4i::zero());
+				q = GSVector4i::cast(GSVector4::cast(q).replace_nan(GSVector4::m_max));
+			}
+			hi = rgba.upl32(q);
+		}
+		else
+		{
+			// The colour and Q the carry holds, which sit in its upper half.
+			hi = carry.m0.srl<8>();
+		}
+		m0 = lo.upl64(hi);
+
+		// m[1] = {xy, Z, UV, FOG}.
+		u64 uvfog = carry.uvfog;
+		if (v.src.uv != GIF_SHAPE_CARRIED)
+		{
+			u64 w;
+			std::memcpy(&w, &base[v.src.uv], sizeof(w));
+			uvfog = (uvfog & 0xFFFFFFFF00000000ull) | (w & 0x3fffull) | ((w >> 16) & 0x3fff0000ull);
+		}
+		if (!v.IsXYZF() && v.src.fog != GIF_SHAPE_CARRIED)
+		{
+			// A FOG descriptor carries F in the bits an XYZF2 carries it in, so
+			// this one read serves both -- which is how an XYZ2 vertex takes the
+			// fog an XYZF2 earlier in the period left behind.
+			const u64 f = (base[v.src.fog].U32[3] >> 4) & 0xFF;
+			uvfog = (uvfog & 0xFFFFFFFFull) | (f << 32);
+		}
+
+		const GSVector4i xy = GSVector4i::loadl(&base[v.off].U64[0]);
+		if (v.IsXYZF())
+		{
+			GSVector4i zf = GSVector4i::loadl(&base[v.off].U64[1]);
+			const GSVector4i xyuv =
+				xy.upl16(xy.srl<4>()).upl32(GSVector4i::load(static_cast<int>(uvfog)));
+			zf = zf.srl32<4>() & GSVector4i::x00ffffff().upl32(GSVector4i::x000000ff());
+			m1 = xyuv.upl32(zf);
+		}
+		else
+		{
+			const GSVector4i z = GSVector4i::loadl(&base[v.off].U64[1]);
+			const GSVector4i xyz = xy.upl16(xy.srl<4>()).upl32(z);
+			m1 = xyz.upl64(GSVector4i::loadl(&uvfog));
+		}
+	}
+
 	// Bounding box of one completed prim's window entries with the class rounding
 	// applied — the bbox half of the legacy CullTest, shared by the scalar-outcode
 	// fast path (which only needs it for accepted prims).
