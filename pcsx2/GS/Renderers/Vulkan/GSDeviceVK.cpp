@@ -2089,7 +2089,11 @@ void GSDeviceVK::ActivateCommandBuffer(u32 index)
 	m_current_command_buffer = resources.command_buffers[1];
 
 	// using the lower 32 bits of the fence index should be sufficient here, I hope...
-	vmaSetCurrentFrameIndex(m_allocator, static_cast<u32>(m_next_fence_counter));
+	// VMA turns each of these into a vkGetPhysicalDeviceMemoryProperties2 to refresh its budget,
+	// and nothing reads the frame index back. It refreshes the budget itself every 30 allocator
+	// operations anyway, so budget-gated allocations only ever see it a fraction of a second stale.
+	if ((m_frame_index_update_counter++ & 31) == 0)
+		vmaSetCurrentFrameIndex(m_allocator, static_cast<u32>(m_next_fence_counter));
 }
 
 void GSDeviceVK::ExecuteCommandBuffer(WaitType wait_for_completion)
@@ -7077,6 +7081,11 @@ void GSDeviceVK::DestroyResources()
 	if (m_tfx_ubo_descriptor_set != VK_NULL_HANDLE)
 		FreePersistentDescriptorSet(m_tfx_ubo_descriptor_set);
 
+	// The front cache holds handles owned by m_tfx_pipelines, so it has to go first. It is the
+	// only invalidation the cache needs: the map is otherwise insert-only.
+	m_tfx_pipeline_cache = {};
+	m_tfx_pipeline_cache_insert = 0;
+
 	for (auto& it : m_tfx_pipelines)
 		vkDestroyPipeline(m_device, it.second, nullptr);
 	for (auto& it : m_tfx_fragment_shaders)
@@ -7513,11 +7522,31 @@ VkPipeline GSDeviceVK::CreateTFXPipeline(const PipelineSelector& p)
 	return pipeline;
 }
 
+void GSDeviceVK::CacheTFXPipeline(const PipelineSelector& p, VkPipeline pipeline)
+{
+	// A failed compile stays out of the front cache: null is how an empty slot is spelled, and the
+	// slow path has to run again anyway to keep reporting the failure.
+	if (pipeline == VK_NULL_HANDLE)
+		return;
+
+	m_tfx_pipeline_cache[m_tfx_pipeline_cache_insert] = {p, pipeline};
+	m_tfx_pipeline_cache_insert ^= 1;
+}
+
 VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
 {
+	for (const TFXPipelineCacheEntry& e : m_tfx_pipeline_cache)
+	{
+		if (e.pipeline != VK_NULL_HANDLE && e.selector == p)
+			return e.pipeline;
+	}
+
 	const auto it = m_tfx_pipelines.find(p);
 	if (it != m_tfx_pipelines.end())
+	{
+		CacheTFXPipeline(p, it->second);
 		return it->second;
+	}
 
 	// A cache miss compiles SYNCHRONOUSLY on the GS thread, freezing the picture for as long as the
 	// driver takes. Normally invisible (a few ms, spread out), but fast-forward runs through content
@@ -7550,6 +7579,7 @@ VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
 		m_tfx_pipeline_compile_counter = 0;
 		g_vulkan_shader_cache->FlushPipelineCache();
 	}
+	CacheTFXPipeline(p, pipeline);
 	return pipeline;
 }
 

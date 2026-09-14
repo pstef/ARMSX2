@@ -4954,21 +4954,25 @@ void GSTextureCache::InvalidateVideoMem(const GSOffset& off, const GSVector4i& r
 		/// rendering will dirty the copy
 		for (int pgs = 0; pgs < pages; pgs++)
 		{
-			auto& list = m_src.m_map[((bp >> 5) + pgs) & 0x1ff];
-			for (auto i = list.begin(); i != list.end();)
+			const u32 page = ((bp >> 5) + pgs) & 0x1ff;
+			if (m_src.PageUsed(page))
 			{
-				Source* s = *i;
-				++i;
-
-				if ((GSUtil::HasSharedBits(psm, s->m_TEX0.PSM) && (end_bp > s->m_TEX0.TBP0 && start_bp < s->UnwrappedEndBlock()) && !s->m_target) ||
-					(GSUtil::HasSharedBits(bp, psm, s->m_from_target_TEX0.TBP0, s->m_TEX0.PSM) && s->m_target))
+				auto& list = m_src.m_map[page];
+				for (auto i = list.begin(); i != list.end();)
 				{
-					m_src.RemoveAt(s);
+					Source* s = *i;
+					++i;
+
+					if ((GSUtil::HasSharedBits(psm, s->m_TEX0.PSM) && (end_bp > s->m_TEX0.TBP0 && start_bp < s->UnwrappedEndBlock()) && !s->m_target) ||
+						(GSUtil::HasSharedBits(bp, psm, s->m_from_target_TEX0.TBP0, s->m_TEX0.PSM) && s->m_target))
+					{
+						m_src.RemoveAt(s);
+					}
 				}
 			}
 
 			const u32 bbp = bp + bw * 0x10;
-			if (bw >= 16 && bbp < 16384)
+			if (bw >= 16 && bbp < 16384 && m_src.PageUsed(bbp >> 5))
 			{
 				// Detect half of the render target (fix snow engine game)
 				// Target Page (8KB) have always a width of 64 pixels
@@ -4988,12 +4992,14 @@ void GSTextureCache::InvalidateVideoMem(const GSOffset& off, const GSVector4i& r
 		}
 	}
 
-	bool found = false;
 	// Previously: rect.ralign<Align_Outside>((bp & 31) == 0 ? GSLocalMemory::m_psm[psm].pgs : GSLocalMemory::m_psm[psm].bs)
 	// But this causes rects to be too big, especially in WRC games, I don't think there's any need to align them here.
 	GSVector4i r = rect;
 
-	off.loopPages(rect, [this, &rect, bp, bw, psm, &found](u32 page) {
+	off.loopPages(rect, [this, &rect, bp, bw, psm](u32 page) {
+		if (!m_src.PageUsed(page))
+			return;
+
 		auto& list = m_src.m_map[page];
 		for (auto i = list.begin(); i != list.end();)
 		{
@@ -5006,8 +5012,6 @@ void GSTextureCache::InvalidateVideoMem(const GSOffset& off, const GSVector4i& r
 
 				if (!s->m_target)
 				{
-					found |= b;
-
 					// No point keeping invalidated sources around when the hash cache is active,
 					// we can just re-hash and create a new source from the cached texture.
 					if (s->m_from_hash_cache || (GSConfig.UserHacks_DisablePartialInvalidation && s->m_repeating))
@@ -8548,13 +8552,26 @@ void GSTextureCache::Target::AssertAlphaKnownAgreesWithRange(const char* site) c
 #endif
 }
 
+u32 GSTextureCache::Target::EndBlockFor(const GSVector4i& rect)
+{
+	const u32 key = static_cast<u32>(m_TEX0.TBP0 | (m_TEX0.TBW << 14) | (m_TEX0.PSM << 20));
+	if (key != m_end_block_key || !m_end_block_key_rect.eq(rect))
+	{
+		m_end_block_key = key;
+		m_end_block_key_rect = rect;
+		m_end_block_memo = GSLocalMemory::GetEndBlockAddress(m_TEX0.TBP0, m_TEX0.TBW, m_TEX0.PSM, rect);
+	}
+
+	return m_end_block_memo;
+}
+
 void GSTextureCache::Target::ResizeValidity(const GSVector4i& rect)
 {
 	if (!m_valid.eq(GSVector4i::zero()))
 	{
 		m_valid = m_valid.rintersect(rect);
 		m_drawn_since_read = m_drawn_since_read.rintersect(rect);
-		m_end_block = GSLocalMemory::GetEndBlockAddress(m_TEX0.TBP0, m_TEX0.TBW, m_TEX0.PSM, m_valid);
+		m_end_block = EndBlockFor(m_valid);
 	}
 
 	// Else No valid size, so need to resize down.
@@ -8570,13 +8587,13 @@ void GSTextureCache::Target::UpdateValidity(const GSVector4i& rect, bool can_res
 	{
 		m_valid = rect;
 
-		m_end_block = GSLocalMemory::GetEndBlockAddress(m_TEX0.TBP0, m_TEX0.TBW, m_TEX0.PSM, m_valid);
+		m_end_block = EndBlockFor(m_valid);
 	}
 	else if (can_resize)
 	{
 		m_valid = m_valid.runion(rect);
 
-		m_end_block = GSLocalMemory::GetEndBlockAddress(m_TEX0.TBP0, m_TEX0.TBW, m_TEX0.PSM, m_valid);
+		m_end_block = EndBlockFor(m_valid);
 	}
 
 	// Growth matters to any claim of the form "every pixel of this target holds X": the
@@ -8693,6 +8710,7 @@ void GSTextureCache::SourceMap::Add(Source* s, const GIFRegTEX0& TEX0)
 	// The source pointer will be stored/duplicated in all m_map[array of pages]
 	s->m_pages.loopPages([this, s](u32 page) {
 		s->m_erase_it[page] = m_map[page].InsertFront(s);
+		m_page_used[page >> 6] |= u64(1) << (page & 63);
 	});
 }
 
@@ -8725,6 +8743,8 @@ void GSTextureCache::SourceMap::RemoveAll()
 	{
 		item.clear();
 	}
+
+	m_page_used.fill(0);
 }
 
 void GSTextureCache::SourceMap::RemoveAt(Source* s)
@@ -8736,6 +8756,8 @@ void GSTextureCache::SourceMap::RemoveAt(Source* s)
 
 	s->m_pages.loopPages([this, s](u32 page) {
 		m_map[page].EraseIndex(s->m_erase_it[page]);
+		if (m_map[page].empty())
+			m_page_used[page >> 6] &= ~(u64(1) << (page & 63));
 	});
 
 	if (s->m_from_hash_cache)

@@ -27,14 +27,6 @@ namespace GSDrawLog
 	// Index of the row opened by BeginDraw, or SIZE_MAX when no row is open.
 	static size_t s_open_record = SIZE_MAX;
 
-	bool IsActive()
-	{
-		// Tracks the setting directly rather than an explicit start, so recording works
-		// when DumpDrawLog is already true at GS open -- there is no config edge to
-		// detect in that case.
-		return GSConfig.DumpDrawLog;
-	}
-
 	void Start()
 	{
 		if (s_active)

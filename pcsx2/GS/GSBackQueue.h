@@ -166,6 +166,24 @@ namespace GSBackQueue
 		bool toggling_field = false;
 		PCRTCDisplay PCRTCDisplays[2] = {};
 
+		/// What UpdateResolution() last computed. Its inputs (the fields above, plus three
+		/// GSConfig options) move once a vsync and on a settings change, while the draw path
+		/// asks for it several times a draw, so it is stored instead of recomputed.
+		/// It ships inside this struct, so the front-to-back PCRTC_SYNC memcpy carries it.
+		GSVector2i resolution = {};
+
+		/// DISPFB.FBP of each display circuit while PMODE enables it, and NoDisplayFBP while it
+		/// does not. The internal-frame-rate heuristic in GSState::DrawRecordTail compares the
+		/// drawn FRAME.FBP against both once a draw; reading the privileged register page there
+		/// costs a cold line for three values that only move once a vsync. FBP is 9 bits, so the
+		/// sentinel cannot collide with a real one.
+		/// Trap: a privileged DISPFB/PMODE write reaches this at the next vsync rather than the
+		/// next draw. There is no GS-side handler to hook - the EE stores those registers
+		/// straight into the shared register page, and GS learns of the write only through
+		/// GSvsync's registers_written.
+		static constexpr u32 NoDisplayFBP = ~0u;
+		u32 display_fbp[2] = {NoDisplayFBP, NoDisplayFBP};
+
 		bool IsAnalogue();
 
 		// Calculates which display is closest to matching zero offsets in either direction.
@@ -183,7 +201,14 @@ namespace GSBackQueue
 		// If the start point of both frames match, we can do a single read
 		bool FrameRectMatch();
 
-		GSVector2i GetResolution();
+		/// Recomputes `resolution`. Call after any write to the fields it reads, and after a
+		/// settings change that can move GSConfig.PCRTCOverscan/PCRTCOffsets/InterlaceMode.
+		void UpdateResolution();
+
+		/// Recomputes display_fbp. Call wherever UpdateResolution is called.
+		void UpdateDisplayFBP(GSRegPMODE pmode, GSRegDISPFB framebuffer0Reg, GSRegDISPFB framebuffer1Reg);
+
+		__fi GSVector2i GetResolution() const { return resolution; }
 
 		GSVector4i GetFramebufferRect(int display);
 

@@ -1295,6 +1295,8 @@ void GSState::ResetPCRTC()
 	PCRTCDisplays.EnableDisplays(m_regs->PMODE, m_regs->SMODE2, isReallyInterlaced());
 	PCRTCDisplays.SetRects(0, m_regs->DISP[0].DISPLAY, m_regs->DISP[0].DISPFB);
 	PCRTCDisplays.SetRects(1, m_regs->DISP[1].DISPLAY, m_regs->DISP[1].DISPFB);
+	PCRTCDisplays.UpdateResolution();
+	PCRTCDisplays.UpdateDisplayFBP(m_regs->PMODE, m_regs->DISP[0].DISPFB, m_regs->DISP[1].DISPFB);
 }
 
 void GSState::UpdateSettings(const Pcsx2Config::GSOptions& old_config)
@@ -1326,6 +1328,10 @@ void GSState::UpdateSettings(const Pcsx2Config::GSOptions& old_config)
 	{
 		ResetHandlers();
 	}
+
+	// The stored resolution also depends on three GSConfig options, and a settings change can
+	// land between two draws without a vsync in between.
+	PCRTCDisplays.UpdateResolution();
 }
 
 bool GSState::isinterlaced()
@@ -4336,8 +4342,7 @@ void GSState::DrawRecordTail(u64 draw_serial)
 	// internal frame rate detection based on sprite blits to the display framebuffer
 	{
 		const u32 FRAME_FBP = m_context->FRAME.FBP;
-		if ((m_regs->DISP[0].DISPFB.FBP == FRAME_FBP && m_regs->PMODE.EN1) ||
-			(m_regs->DISP[1].DISPFB.FBP == FRAME_FBP && m_regs->PMODE.EN2))
+		if (PCRTCDisplays.display_fbp[0] == FRAME_FBP || PCRTCDisplays.display_fbp[1] == FRAME_FBP)
 		{
 			g_perfmon.AddDisplayFramebufferSpriteBlit();
 		}
@@ -4425,7 +4430,21 @@ void GSState::DrawRecordTail(u64 draw_serial)
 		Draw();
 
 	g_perfmon.Put(GSPerfMon::Draw, 1);
-	g_perfmon.Put(GSPerfMon::Prim, m_index->tail / GSUtil::GetVertexCount(PRIM->PRIM));
+
+	// GetVertexCount is 1, 2 or 3 for a real prim class, so the obvious expression is a runtime
+	// udiv on the per-draw path. Switching on the class instead gives every arm a constant
+	// divisor. The invalid class divides by GetClassVertexCount's -1 widened to u32, which is
+	// what the u32/int conversion in the divide did.
+	u32 prim_count;
+	switch (GSUtil::GetPrimClass(PRIM->PRIM))
+	{
+		case GS_POINT_CLASS:    prim_count = m_index->tail;      break;
+		case GS_LINE_CLASS:
+		case GS_SPRITE_CLASS:   prim_count = m_index->tail >> 1; break;
+		case GS_TRIANGLE_CLASS: prim_count = m_index->tail / 3;  break;
+		default:                prim_count = m_index->tail / static_cast<u32>(-1); break;
+	}
+	g_perfmon.Put(GSPerfMon::Prim, prim_count);
 
 	if (GSConfig.ShouldDump(draw_serial, g_perfmon.GetFrame()))
 	{
@@ -9361,10 +9380,14 @@ bool GSState::GSPCRTCRegs::FrameRectMatch()
 	return PCRTCSameSrc;
 }
 
-GSVector2i GSState::GSPCRTCRegs::GetResolution()
+void GSState::GSPCRTCRegs::UpdateDisplayFBP(GSRegPMODE pmode, GSRegDISPFB framebuffer0Reg, GSRegDISPFB framebuffer1Reg)
 {
-	GSVector2i resolution;
+	display_fbp[0] = pmode.EN1 ? static_cast<u32>(framebuffer0Reg.FBP) : NoDisplayFBP;
+	display_fbp[1] = pmode.EN2 ? static_cast<u32>(framebuffer1Reg.FBP) : NoDisplayFBP;
+}
 
+void GSState::GSPCRTCRegs::UpdateResolution()
+{
 	const GSVector4i offsets = !GSConfig.PCRTCOverscan ? VideoModeOffsets[videomode] : VideoModeOffsetsOverscan[videomode];
 	const bool is_full_height = interlaced || (toggling_field && GSConfig.InterlaceMode != GSInterlaceMode::Off) || GSConfig.InterlaceMode == GSInterlaceMode::Off;
 
@@ -9397,8 +9420,6 @@ GSVector2i GSState::GSPCRTCRegs::GetResolution()
 
 	resolution.x = std::min(resolution.x, offsets.x);
 	resolution.y = std::min(resolution.y, is_full_height ? offsets.y << 1 : offsets.y);
-
-	return resolution;
 }
 
 GSVector4i GSState::GSPCRTCRegs::GetFramebufferRect(int display)

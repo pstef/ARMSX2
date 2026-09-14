@@ -564,6 +564,23 @@ private:
 	std::unordered_map<PipelineSelector, VkPipeline, PipelineSelectorHash> m_tfx_pipelines;
 	u32 m_tfx_pipeline_compile_counter = 0;
 
+	/// Throttles the vmaSetCurrentFrameIndex in ActivateCommandBuffer; see there.
+	u32 m_frame_index_update_counter = 0;
+
+	struct TFXPipelineCacheEntry
+	{
+		PipelineSelector selector;
+		VkPipeline pipeline = VK_NULL_HANDLE;
+	};
+
+	/// Front cache in front of m_tfx_pipelines, hit with the 32-byte bit compare instead of the
+	/// hash. Two entries because a scene alternates between a pair of pipelines and a DATE draw
+	/// binds a third, mutated selector between them; a single slot thrashes on that.
+	/// A null pipeline means the slot is empty - a failed compile is never cached here, so the
+	/// zeroed selector a default-constructed entry carries can never be mistaken for a hit.
+	std::array<TFXPipelineCacheEntry, 2> m_tfx_pipeline_cache;
+	u32 m_tfx_pipeline_cache_insert = 0;
+
 	VkRenderPass m_utility_color_render_pass_load = VK_NULL_HANDLE;
 	VkRenderPass m_utility_color_render_pass_clear = VK_NULL_HANDLE;
 	VkRenderPass m_utility_color_render_pass_discard = VK_NULL_HANDLE;
@@ -638,6 +655,7 @@ private:
 	VkShaderModule GetTFXVertexShader(GSHWDrawConfig::VSSelector sel);
 	VkShaderModule GetTFXFragmentShader(const GSHWDrawConfig::PSSelector& sel);
 	VkPipeline CreateTFXPipeline(const PipelineSelector& p);
+	void CacheTFXPipeline(const PipelineSelector& p, VkPipeline pipeline);
 	VkPipeline GetTFXPipeline(const PipelineSelector& p);
 
 	VkShaderModule GetUtilityVertexShader(const std::string& source, const char* replace_main);

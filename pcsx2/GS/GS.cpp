@@ -633,6 +633,8 @@ void GSvsync(u32 field, bool registers_written)
 	front->PCRTCDisplays.CheckSameSource();
 	front->PCRTCDisplays.CalculateDisplayOffset(front->m_scanmask_used);
 	front->PCRTCDisplays.CalculateFramebufferOffset(front->m_scanmask_used, front->m_regs->DISP[0].DISPFB, front->m_regs->DISP[1].DISPFB);
+	front->PCRTCDisplays.UpdateResolution();
+	front->PCRTCDisplays.UpdateDisplayFBP(front->m_regs->PMODE, front->m_regs->DISP[0].DISPFB, front->m_regs->DISP[1].DISPFB);
 
 	// The PCRTC record must precede the vsync-flushed draw records — those draws
 	// see the fresh display state, mid-frame draws saw the previous frame's.

@@ -273,6 +273,23 @@ public:
 		GSVector4i m_drawn_since_read{};
 		int readbacks_since_draw = 0;
 
+	private:
+		/// Memo for the m_end_block recompute in ResizeValidity/UpdateValidity. Both run on the
+		/// per-draw path with a valid rect that usually has not moved, and GetEndBlockAddress
+		/// goes through the indirect m_psm[psm].info.bn.
+		/// The memoised value is re-assigned rather than the assignment skipped: m_end_block is
+		/// also written from outside, by a target that inherits another target's end block
+		/// (LookupDrawTarget's dst_match path, PreloadTarget), and has to keep landing back on
+		/// the value these two compute. m_end_block_key is above every real key while unset, since TBP0/TBW/PSM only
+		/// reach bit 25.
+		static constexpr u32 EndBlockKeyUnset = ~0u;
+		u32 m_end_block_key = EndBlockKeyUnset;
+		GSVector4i m_end_block_key_rect{};
+		u32 m_end_block_memo = 0;
+
+		/// GetEndBlockAddress(m_TEX0.TBP0, m_TEX0.TBW, m_TEX0.PSM, rect), through the memo.
+		u32 EndBlockFor(const GSVector4i& rect);
+
 	public:
 		Target(GIFRegTEX0 TEX0, int type, const GSVector2i& unscaled_size, float scale, GSTexture* texture);
 		~Target();
@@ -398,6 +415,14 @@ public:
 	public:
 		std::unordered_set<Source*> m_surfaces;
 		std::array<FastList<Source*>, GS_MAX_PAGES> m_map;
+
+		/// One bit a page, set while m_map[page] is non-empty. InvalidateVideoMem sweeps the whole
+		/// page range of a written rect twice a draw and nearly every head it touches is empty, so
+		/// the bit test replaces a dependent load into a cold FastList. Add/RemoveAt/RemoveAll are
+		/// the only writers of m_map, so they are the only places this has to be kept in step.
+		std::array<u64, GS_MAX_PAGES / 64> m_page_used = {};
+
+		__fi bool PageUsed(u32 page) const { return (m_page_used[page >> 6] >> (page & 63)) & 1; }
 
 		void Add(Source* s, const GIFRegTEX0& TEX0);
 		void SwapTexture(GSTexture* old_tex, GSTexture* new_tex);

@@ -2911,9 +2911,11 @@ namespace
 			if (active)
 				g_gs_device->PopDrawLabel();
 
-			// Unconditional: a draw that returns before submit still gets a row, marked
-			// unsubmitted, because "which draws were skipped" is itself a useful signal.
-			GSDrawLog::FinishDraw();
+			// A draw that returns before submit still gets a row, marked unsubmitted, because
+			// "which draws were skipped" is itself a useful signal. Only the ledger being off
+			// skips it, and then there is no row open to close.
+			if (GSDrawLog::IsActive()) [[unlikely]]
+				GSDrawLog::FinishDraw();
 		}
 	};
 } // namespace
@@ -10422,7 +10424,8 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
 
 	// Completes the row opened at the top of Draw() with the backend view, which only
 	// exists here.
-	GSDrawLog::EndDraw(m_conf, static_cast<u8>(m_prim_overlap));
+	if (GSDrawLog::IsActive()) [[unlikely]]
+		GSDrawLog::EndDraw(m_conf, static_cast<u8>(m_prim_overlap));
 
 	if (!m_channel_shuffle_width)
 		g_gs_device->RenderHW(m_conf);

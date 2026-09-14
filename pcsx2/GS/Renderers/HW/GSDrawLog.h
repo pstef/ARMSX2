@@ -109,8 +109,15 @@ namespace GSDrawLog
 		FlagFeedbackLoopRT = 1 << 7, ///< the pixel shader reads the render target (any reason)
 	};
 
-	/// Whether recording is currently active. Cheap enough to test per draw.
-	bool IsActive();
+	/// Whether recording is currently active. Inline, and the guard on every call site in the
+	/// draw path, so a build with the ledger off pays a load and a branch rather than four
+	/// out-of-line calls a draw.
+	/// It tracks the setting directly rather than an explicit start, so recording works when
+	/// DumpDrawLog is already true at GS open -- there is no config edge to detect in that case.
+	__forceinline_odr bool IsActive()
+	{
+		return GSConfig.DumpDrawLog;
+	}
 
 	/// Allocates the arena and begins recording. Safe to call when already active.
 	void Start();
