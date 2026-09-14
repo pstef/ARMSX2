@@ -1456,6 +1456,7 @@ static inline u32 GetVertexAlignment(GSHWDrawConfig::VSExpand expand)
 }
 
 class GSPassScheduler;
+class GSDepthFuseLatch;
 
 class GSDevice : public GSAlignedClass<32>
 {
@@ -1646,6 +1647,15 @@ protected:
 	std::unique_ptr<GSPassScheduler> m_pass_scheduler;
 	u32 m_deferred_draw_count = 0;
 	bool m_flushing = false;
+
+	/// A colour draw waiting one RenderHW call to see whether its depth-only twin follows,
+	/// so the pair can be submitted as one draw. See GSDepthFuseLatch. It is counted into
+	/// m_deferred_draw_count, so every flush wrapper drains it along with the scheduler.
+	std::unique_ptr<GSDepthFuseLatch> m_depth_fuse;
+
+	/// Renders or defers a draw that the latch has already had its say about.
+	void SubmitRenderHW(GSHWDrawConfig& config);
+	void UpdateDeferredDrawCount();
 
 	/// Textures the texture cache has finished with, but which queued draws still read or
 	/// write. They go back into the pool once those draws have run - returning them any

@@ -539,6 +539,7 @@ set(pcsx2GSSources
 	GS/Renderers/Common/GSGPUProfileMali.cpp
 	GS/Renderers/Common/GSGPUProfileAdreno.cpp
 	GS/Renderers/Common/GSGPUProfilePowerVR.cpp
+	GS/Renderers/Common/GSDepthFuseLatch.cpp
 	GS/Renderers/Common/GSPassScheduler.cpp
 	GS/Renderers/Common/GSRenderer.cpp
 	GS/Renderers/Common/GSTexture.cpp
@@ -592,6 +593,7 @@ set(pcsx2GSHeaders
 	GS/Renderers/Common/GSGPUProfile.h
 	GS/Renderers/Common/GSGPUProfilePrivate.h
 	GS/Renderers/Common/GSInterlaceModePolicy.h
+	GS/Renderers/Common/GSDepthFuseLatch.h
 	GS/Renderers/Common/GSPassScheduler.h
 	GS/Renderers/Common/GSPresentationPolicy.h
 	GS/Renderers/Common/GSRenderer.h

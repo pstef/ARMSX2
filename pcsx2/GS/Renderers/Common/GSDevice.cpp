@@ -5,6 +5,7 @@
 #ifdef ARMSX2_EMBEDDED_RESOURCES
 #include "EmbeddedResources.h"
 #endif
+#include "GS/Renderers/Common/GSDepthFuseLatch.h"
 #include "GS/Renderers/Common/GSPassScheduler.h"
 #include "GS/GSGL.h"
 #include "GS/GS.h"
@@ -287,6 +288,7 @@ std::unique_ptr<GSDevice> g_gs_device;
 
 GSDevice::GSDevice()
 	: m_pass_scheduler(std::make_unique<GSPassScheduler>())
+	, m_depth_fuse(std::make_unique<GSDepthFuseLatch>())
 {
 #ifdef PCSX2_DEVBUILD
 	s_texture_counts.fill(0);
@@ -456,6 +458,7 @@ void GSDevice::Destroy()
 	// Drop rather than emit: nothing is going to present these, and the targets they name
 	// are about to be destroyed.
 	m_pass_scheduler->Clear();
+	m_depth_fuse->Clear();
 	m_deferred_draw_count = 0;
 
 	// Nothing references these any more, and PurgePool() below deletes whatever the pool
@@ -1154,6 +1157,43 @@ void GSDevice::StretchRectAutoMask(GSTexture* sTex, GSTexture* dTex, bool red, b
 
 void GSDevice::RenderHW(GSHWDrawConfig& config)
 {
+	// m_flushing: the latch is being drained, and the draw coming back through here is the
+	// one that was held. IsDSInRTActive: the caller is mid depth-as-colour sequence and
+	// will tear the temporary target down as soon as we return.
+	if (!m_flushing)
+	{
+		if (m_depth_fuse->IsHeld())
+		{
+			if (m_depth_fuse->IsTwin(config))
+			{
+				// The incoming draw is spent: everything it would have written, the held
+				// draw now writes.
+				GSHWDrawConfig& fused = m_depth_fuse->Fuse();
+				UpdateDeferredDrawCount();
+				SubmitRenderHW(fused);
+				return;
+			}
+
+			// Nothing to fold into it, and it has to keep its place in the stream, so it
+			// goes out ahead of the draw that displaced it.
+			GSHWDrawConfig& held = m_depth_fuse->Release();
+			UpdateDeferredDrawCount();
+			SubmitRenderHW(held);
+		}
+
+		if (!IsDSInRTActive() && GSDepthFuseLatch::IsHoldable(config))
+		{
+			m_depth_fuse->Hold(config);
+			UpdateDeferredDrawCount();
+			return;
+		}
+	}
+
+	SubmitRenderHW(config);
+}
+
+void GSDevice::SubmitRenderHW(GSHWDrawConfig& config)
+{
 	// m_flushing: we are already inside Emit(), so this is a draw the backend is issuing
 	// on its own behalf. IsDSInRTActive: the caller is mid depth-as-colour sequence and
 	// will tear the temporary target down as soon as we return.
@@ -1178,12 +1218,17 @@ void GSDevice::RenderHW(GSHWDrawConfig& config)
 		}
 	}
 
-	m_deferred_draw_count = m_pass_scheduler->GetCount();
+	UpdateDeferredDrawCount();
+}
+
+void GSDevice::UpdateDeferredDrawCount()
+{
+	m_deferred_draw_count = m_pass_scheduler->GetCount() + (m_depth_fuse->IsHeld() ? 1u : 0u);
 }
 
 bool GSDevice::DeferredDrawsReference(const GSTexture* tex) const
 {
-	return m_pass_scheduler->References(tex);
+	return m_pass_scheduler->References(tex) || m_depth_fuse->References(tex);
 }
 
 void GSDevice::FlushDeferredDrawsImpl()
@@ -1192,6 +1237,10 @@ void GSDevice::FlushDeferredDrawsImpl()
 
 	m_flushing = true;
 	m_pass_scheduler->Emit(this);
+	// The latch never holds anything older than the scheduler's backlog - a draw reaching
+	// the scheduler drains it first - so it goes out last.
+	if (m_depth_fuse->IsHeld())
+		DoRenderHW(m_depth_fuse->Release());
 	m_flushing = false;
 
 	m_deferred_draw_count = 0;
