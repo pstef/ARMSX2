@@ -1264,6 +1264,11 @@ void GSDevice::UpdateDeferredDrawCount()
 							((m_dual_fuse && m_dual_fuse->IsHeld()) ? 1u : 0u);
 }
 
+const GSHWDrawConfig* GSDevice::HeldDualBase() const
+{
+	return (m_dual_fuse && m_dual_fuse->IsHeld()) ? &m_dual_fuse->Held() : nullptr;
+}
+
 bool GSDevice::DeferredDrawsReference(const GSTexture* tex) const
 {
 	return m_pass_scheduler->References(tex) || m_depth_fuse->References(tex) ||

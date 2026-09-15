@@ -48,6 +48,13 @@ public:
 
 	__fi bool IsHeld() const { return m_held; }
 
+	/// The held draw. Only meaningful while IsHeld().
+	__fi const GSHWDrawConfig& Held() const { pxAssert(m_held); return m_config; }
+
+	/// True when the two vertex arrays are equal outside their colour: the geometry half of
+	/// IsTwin(), exposed so the renderer can ask it of raw vertices before a config exists.
+	static bool SameGeometryOutsideColour(const GSVertex* a, const GSVertex* b, u32 count);
+
 	/// True when a draw is worth holding back as the base layer of a pair: it writes colour
 	/// through every channel with no blending of its own, tests depth with ZTST_GREATER, samples
 	/// a texture that is neither attachment, and carries nothing the fused shader cannot

@@ -5,6 +5,7 @@
 
 #include "GSTextureCache.h"
 #include "GS/Renderers/HW/GSDrawAlphaMask.h"
+#include "GS/Renderers/Common/GSDualFuseLatch.h"
 #include "GS/Renderers/Common/GSFunctionMap.h"
 #include "GS/Renderers/Common/GSRenderer.h"
 #include "GS/Renderers/Common/GSSwPrimRender.h"
@@ -326,6 +327,37 @@ private:
 
 	bool m_process_texture = false;
 	bool m_downscale_source = false;
+
+	/// What the previous Draw() computed for a base layer the device is holding, kept for the
+	/// twin that usually follows it. See TryDrawTwin().
+	struct TwinBase
+	{
+		GSTextureCache::Target* rt = nullptr;
+		GSTextureCache::Target* ds = nullptr;
+		TextureMinMaxResult tmm = {};
+		GSVector4i r = {};
+		GSVector4i r_no_scissor = {};
+		HWCachedCtx ctx = {};
+		GIFRegTEX0 lookup_tex0 = {};
+		GIFRegCLAMP lookup_clamp = {};
+		u64 tex0 = 0;
+		u64 regs[16] = {};
+		/// The base's vertices and indices as the kick wrote them: DrawPrims() may rewrite the
+		/// buffer (ST by Q, say) before the latch copies it, so the held config cannot serve.
+		GSVertex verts[GSDualFuseLatch::MAX_VERTS] = {};
+		u16 indices[GSDualFuseLatch::MAX_INDICES] = {};
+		u64 draw_n = 0;
+		u32 nverts = 0;
+		u32 nindices = 0;
+		NoGapsType covers_without_gaps = {};
+		bool union_covers_rect = false;
+		bool staged = false;
+		bool valid = false;
+	};
+	TwinBase m_twin_base;
+	void TwinRegisters(u64* out) const;
+	void StageTwinBase(GSTextureCache::Target* rt, GSTextureCache::Target* ds, GSTextureCache::Source* src, const TextureMinMaxResult& tmm, bool plain_draw);
+	bool TryDrawTwin(u32 fm, u32 zm);
 
 	TextureShuffleInfo m_texture_shuffle;
 

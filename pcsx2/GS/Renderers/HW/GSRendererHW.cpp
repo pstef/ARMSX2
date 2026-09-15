@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "GS/Renderers/HW/GSRendererHW.h"
+#include "GS/Renderers/Common/GSDualFuseLatch.h"
 #include "GS/Renderers/HW/GSHwHack.h"
 #include "GS/Renderers/HW/GSDepthCoverage.h"
 #include "GS/Renderers/HW/GSDrawLog.h"
@@ -3003,6 +3004,228 @@ std::string GSRendererHW::DescribeDraw() const
 	return desc;
 }
 
+
+void GSRendererHW::TwinRegisters(u64* out) const
+{
+	const GSDrawingContext& c = *m_context;
+	const GSDrawingEnvironment& e = *m_draw_env;
+	const u64 regs[16] = {c.XYOFFSET.U64, c.TEX1.U64, c.CLAMP.U64, c.MIPTBP1.U64, c.MIPTBP2.U64, c.SCISSOR.U64, c.FBA.U64,
+		c.FRAME.U64, c.ZBUF.U64, e.PRIM.U64, e.TEXCLUT.U64, e.SCANMSK.U64, e.TEXA.U64, e.DIMX.U64, e.DTHE.U64,
+		e.COLCLAMP.U64 | (e.PABE.U64 << 32)};
+	std::memcpy(out, regs, sizeof(regs));
+}
+
+void GSRendererHW::StageTwinBase(GSTextureCache::Target* rt, GSTextureCache::Target* ds, GSTextureCache::Source* src, const TextureMinMaxResult& tmm, bool plain_draw)
+{
+	TwinBase& base = m_twin_base;
+	base.valid = false;
+	base.staged = false;
+	if (!plain_draw || !rt || !ds || !src || !GSConfig.FuseLayeredDraws)
+		return;
+
+	// The twin path reuses these lookups as they stand, so the draw has to be the plain
+	// textured triangle draw the path is written for: no shuffle, no offset target, no
+	// temporary depth, no mipmap, no target-backed source, native scale, no hook or dump
+	// that would want to see the twin as a draw of its own.
+	if (m_vt.m_primclass != GS_TRIANGLE_CLASS || m_texture_shuffle || m_channel_shuffle || m_using_temp_z || m_in_target_draw ||
+		m_target_offset != 0 || m_downscale_source || !m_process_texture || m_lod.x != 0 || m_lod.y != 0 || IsMipMapActive())
+		return;
+	if (src->m_from_target || src->m_shared_texture || src->m_target || rt->GetScale() != 1.0f || ds->GetScale() != 1.0f)
+		return;
+	if (GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].depth || g_texture_cache->GetTemporaryZ() || g_gs_device->GetColorClipTexture() ||
+		m_mem.m_clut.GetGPUTexture() || m_oi || GSConfig.DumpGSData)
+		return;
+
+	// Only a draw the latch could hold is worth copying: depth-tested with ZTST_GREATER and
+	// written, every colour channel written, and small enough for the latch.
+	if (!m_cached_ctx.TEST.ZTE || m_cached_ctx.TEST.ZTST != ZTST_GREATER || m_cached_ctx.ZBUF.ZMSK ||
+		(m_cached_ctx.FRAME.FBMSK & GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].fmsk) != 0)
+		return;
+	if (m_vertex->next > GSDualFuseLatch::MAX_VERTS || m_index->tail > GSDualFuseLatch::MAX_INDICES)
+		return;
+	std::memcpy(base.verts, m_vertex->buff, sizeof(GSVertex) * m_vertex->next);
+	std::memcpy(base.indices, m_index->buff, sizeof(u16) * m_index->tail);
+
+	base.rt = rt;
+	base.ds = ds;
+	base.tmm = tmm;
+	base.r = m_r;
+	base.r_no_scissor = m_r_no_scissor;
+	base.ctx = m_cached_ctx;
+	base.tex0 = m_context->TEX0.U64;
+	TwinRegisters(base.regs);
+	base.draw_n = s_n;
+	base.nverts = m_vertex->next;
+	base.nindices = m_index->tail;
+	base.covers_without_gaps = m_primitive_covers_without_gaps;
+	base.union_covers_rect = m_primitive_union_covers_rect;
+	base.staged = true;
+}
+
+// A mesh lit in two layers arrives as two draws with the same geometry: the base, which the
+// device's dual-stage latch is holding, then the twin, which differs from it only in its
+// vertex colours, its palette (TEX0.CBP), fog colour, and the TEST/ALPHA pair that makes it
+// an accumulation with no depth write. Draw() would look the same targets up again, walk the
+// same texture range and recompute the same draw rectangle before DrawPrims() builds the
+// twin's config and the latch fuses it. This path skips that repetition: it checks that the
+// registers and vertices are the base's outside those fields, looks the twin's own palette
+// source up, restores the base's cached context with the twin's fields patched in, and goes
+// straight to DrawPrims(). Everything Draw() would do after DrawPrims() for this draw is done
+// here too, except what the base already did with the same arguments.
+//
+// Returns false, having changed nothing, when the draw is not such a twin; Draw() then
+// carries on from where it called. The source lookup is the one exception: it may already
+// have run, and Draw() repeating it with the same arguments finds the same source.
+bool GSRendererHW::TryDrawTwin(u32 fm, u32 zm)
+{
+	TwinBase& base = m_twin_base;
+	if (!base.valid)
+		return false;
+	base.valid = false;
+
+	const GSHWDrawConfig* held = g_gs_device->HeldDualBase();
+	if (!held || !GSConfig.FuseLayeredDraws)
+		return false;
+
+	// Nothing else has drawn to either target since the base.
+	GSTextureCache::Target* rt = base.rt;
+	GSTextureCache::Target* ds = base.ds;
+	if (rt->m_last_draw != base.draw_n || ds->m_last_draw != base.draw_n || held->rt != rt->m_texture || held->ds != ds->m_texture)
+		return false;
+
+	// The registers: the base's outside TEX0.CBP, TEST, ALPHA and FOGCOL, with TEST and
+	// ALPHA in the one shape the fused shader implements (the latch's twin rule, at the
+	// register level).
+	u64 regs[16];
+	TwinRegisters(regs);
+	if (std::memcmp(regs, base.regs, sizeof(regs)) != 0)
+		return false;
+	constexpr u64 cbp_mask = 0x3FFFull << 37;
+	if (((m_context->TEX0.U64 ^ base.tex0) & ~cbp_mask) != 0)
+		return false;
+	const GIFRegTEST& test = m_context->TEST;
+	if (!test.ATE || test.ATST != ATST_NEVER || test.AFAIL != AFAIL_FB_ONLY || test.DATE || !test.ZTE || test.ZTST != ZTST_GEQUAL)
+		return false;
+	const GIFRegALPHA& alpha = m_context->ALPHA;
+	if (alpha.A != 0 || alpha.B != 2 || alpha.C != 0 || alpha.D != 1)
+		return false;
+	// What the prologue derived from them: the alpha test folded away, no depth write, the
+	// base's frame mask.
+	if (m_cached_ctx.TEST.ATE || zm != 0xffffffffu || fm != base.ctx.FRAME.FBMSK)
+		return false;
+	if (m_vt.m_primclass != GS_TRIANGLE_CLASS || !PRIM->TME || m_texture_shuffle || m_channel_shuffle)
+		return false;
+	if (g_texture_cache->GetTemporaryZ() || g_gs_device->GetColorClipTexture() || m_mem.m_clut.GetGPUTexture() || GSConfig.DumpGSData)
+		return false;
+
+	// The geometry, as the kick wrote it for both draws.
+	if (m_vertex->next != base.nverts || m_index->tail != base.nindices)
+		return false;
+	if (std::memcmp(m_index->buff, base.indices, sizeof(u16) * base.nindices) != 0)
+		return false;
+	if (!GSDualFuseLatch::SameGeometryOutsideColour(m_vertex->buff, base.verts, base.nverts))
+		return false;
+
+	// The decisions Draw() takes for this draw from its own state, each of which would send
+	// it somewhere this path does not go.
+	if (!IsRTWritten() || IsDepthAlwaysPassing() || IsPossibleChannelShuffle())
+		return false;
+	if (GSLocalMemory::m_psm[m_cached_ctx.ZBUF.PSM].trbpp == 32 && ds->m_alpha_max != 0)
+	{
+		// Draw() drops the depth test, and with it the depth target, when no stored depth
+		// can fail it.
+		const u32 max_z = (static_cast<u64>(ds->m_alpha_max + 1) << 24) - 1;
+		if (max_z <= m_vt.m_min.p.z)
+			return false;
+	}
+
+	// Which channels of the texture the draw needs, as Draw() decides it before the source
+	// lookup, for a draw that is not a channel shuffle.
+	const u32 fm_mask = GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].fmsk;
+	const bool need_aem_color = GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].trbpp <= 24 && GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].pal == 0 && ((NeedsBlending() && m_context->ALPHA.C == 0) || IsDiscardingDstAlpha()) && m_cached_ctx.TEXA.AEM;
+	const u32 color_mask = (m_vt.m_max.c > GSVector4i::zero()).mask();
+	const bool texture_function_color = m_cached_ctx.TEX0.TFX == TFX_DECAL || (color_mask & 0xFFF) || (m_cached_ctx.TEX0.TFX > TFX_DECAL && (color_mask & 0xF000));
+	const bool texture_function_alpha = m_cached_ctx.TEX0.TFX != TFX_MODULATE || (color_mask & 0xF000);
+	const bool color_used = (texture_function_color && (!PRIM->ABE || (NeedsBlending() && IsUsingCsInBlend())) && ((m_cached_ctx.FRAME.FBMSK & (fm_mask & 0x00FFFFFF)) != (fm_mask & 0x00FFFFFF))) || need_aem_color;
+	const bool alpha_used = (m_context->TEX0.TCC && texture_function_alpha) && ((NeedsBlending() && IsUsingAsInBlend()) || (m_cached_ctx.TEST.ATE && m_cached_ctx.TEST.ATST > ATST_ALWAYS) || (m_cached_ctx.FRAME.FBMSK & (fm_mask & 0xFF000000)) != (fm_mask & 0xFF000000));
+	const bool req_color = (GSUtil::GetChannelMask(m_context->TEX0.PSM) & 0x7) && color_used;
+	const bool req_alpha = (GSUtil::GetChannelMask(m_context->TEX0.PSM) == 0x8 && (color_used || alpha_used)) || ((GSUtil::GetChannelMask(m_context->TEX0.PSM) & 0x8) && alpha_used);
+	if (!req_color && !req_alpha)
+		return false;
+
+	// The twin's own palette, looked up as Draw() would: the base's texture range and clamp
+	// arguments, this draw's CBP.
+	GIFRegTEX0 TEX0 = base.lookup_tex0;
+	TEX0.CBP = m_context->TEX0.CBP;
+	const GSVector2i lod_range(0, 0);
+	GSTextureCache::Source* src = g_texture_cache->LookupSource(true, TEX0, m_cached_ctx.TEXA, base.lookup_clamp, base.tmm.coverage,
+		(GSConfig.HWMipmap || GSConfig.TriFilter == TriFiltering::Forced) ? &lod_range : nullptr, false, m_vt.IsLinear(), m_cached_ctx.FRAME, req_color, req_alpha);
+	if (!src) [[unlikely]]
+	{
+		GL_INS("HW: ERROR: Source lookup failed, skipping.");
+		CleanupDraw(true);
+		return true;
+	}
+	if (src->m_from_target || src->m_shared_texture || src->m_target)
+		return false;
+
+	// The source's alpha range, which Draw() folds into the vertex trace once the source is
+	// known; with the alpha test already folded away it changes nothing else here.
+	if (src->m_valid_alpha_minmax)
+		CalcAlphaMinMax(src->m_alpha_minmax.first, src->m_alpha_minmax.second);
+
+	// The base's state at DrawPrims(), with this draw's fields in it.
+	const GIFRegTEST twin_test = m_cached_ctx.TEST;
+	m_cached_ctx = base.ctx;
+	m_cached_ctx.TEST = twin_test;
+	m_cached_ctx.TEX0.CBP = m_context->TEX0.CBP;
+	m_cached_ctx.ZBUF.ZMSK = true;
+	m_r = base.r;
+	m_r_no_scissor = base.r_no_scissor;
+	m_primitive_covers_without_gaps = base.covers_without_gaps;
+	m_primitive_union_covers_rect = base.union_covers_rect;
+	m_process_texture = true;
+	m_lod = GSVector2i(0, 0);
+	m_using_temp_z = false;
+	m_in_target_draw = false;
+	m_target_offset = 0;
+	m_downscale_source = false;
+	m_last_channel_shuffle_end_block = 0xFFFF;
+
+	// Preloaded data the targets may still owe (Draw() does this just before DrawPrims()).
+	if (!rt->m_dirty.empty() && !rt->m_dirty.GetTotalRect(rt->m_TEX0, rt->m_unscaled_size).rintersect(m_r).rempty())
+	{
+		const u32 alpha = m_cached_ctx.FRAME.FBMSK >> 24;
+		const u32 alpha_mask = fm_mask >> 24;
+		rt->Update((alpha != 0 && (alpha & alpha_mask) != alpha_mask) || (!alpha && (GetAlphaMinMax().max | (m_context->FBA.FBA << 7)) > 128));
+	}
+	else
+		rt->m_age = 0;
+	if (!ds->m_dirty.empty() && !ds->m_dirty.GetTotalRect(ds->m_TEX0, ds->m_unscaled_size).rintersect(m_r).rempty())
+		ds->Update();
+	else
+		ds->m_age = 0;
+
+	DrawPrims(rt, ds, src, base.tmm);
+
+	// What Draw() does after DrawPrims() for a draw that writes colour and no depth.
+	g_texture_cache->InvalidateTemporarySource();
+	if ((fm & fm_mask) != fm_mask)
+	{
+		const bool frame_masked = (m_cached_ctx.FRAME.FBMSK & fm_mask) == fm_mask;
+		rt->UpdateValidity(m_r, !frame_masked);
+	}
+	rt->m_last_draw = s_n;
+	ds->m_last_draw = s_n;
+	if ((fm & fm_mask) != fm_mask)
+	{
+		g_texture_cache->InvalidateVideoMem(m_context->offset.fb, m_r, false);
+		g_texture_cache->InvalidateVideoMemType(GSTextureCache::DepthStencil, m_cached_ctx.FRAME.Block(), m_cached_ctx.FRAME.PSM, fm);
+	}
+	CleanupDraw(false);
+	return true;
+}
+
 void GSRendererHW::Draw()
 {
 	static u32 num_skipped_channel_shuffle_draws = 0;
@@ -3243,6 +3466,9 @@ void GSRendererHW::Draw()
 
 	m_cached_ctx.FRAME.FBMSK = fm;
 	m_cached_ctx.ZBUF.ZMSK = zm != 0;
+
+	if (TryDrawTwin(fm, zm))
+		return;
 
 	// It is allowed to use the depth and rt at the same location. However at least 1 must
 	// be disabled. Or the written value must be the same on both channels.
@@ -3814,6 +4040,9 @@ void GSRendererHW::Draw()
 			src = tex_psm.depth ? g_texture_cache->LookupDepthSource(true, TEX0, m_cached_ctx.TEXA, MIP_CLAMP, tmm.coverage, possible_shuffle, m_vt.IsLinear(), m_cached_ctx.FRAME, req_color, req_alpha)
 			                    : g_texture_cache->LookupSource(true, TEX0, m_cached_ctx.TEXA, MIP_CLAMP, tmm.coverage, (GSConfig.HWMipmap || GSConfig.TriFilter == TriFiltering::Forced) ? &hash_lod_range : nullptr,
 			                         possible_shuffle, m_vt.IsLinear(), m_cached_ctx.FRAME, req_color, req_alpha);
+
+			m_twin_base.lookup_tex0 = TEX0;
+			m_twin_base.lookup_clamp = MIP_CLAMP;
 
 			if (!src) [[unlikely]]
 			{
@@ -5419,8 +5648,17 @@ void GSRendererHW::Draw()
 	//
 	const GSVector4i real_rect = m_r;
 
+	StageTwinBase(rt, ds, src, tmm, !skip_draw && is_possible_mem_clear == NotClear && !possible_shuffle && !old_rt && !old_ds);
+
 	if (!skip_draw)
 		DrawPrims(rt, ds, src, tmm);
+
+	// Only a held draw has a twin to look for, and the held draw has to be this one.
+	if (m_twin_base.staged)
+	{
+		const GSHWDrawConfig* held = g_gs_device->HeldDualBase();
+		m_twin_base.valid = held && held->rt == rt->m_texture && held->ds == ds->m_texture && held->tex == src->m_texture;
+	}
 
 
 	// Temporary source *must* be invalidated before normal, because otherwise it'll be double freed.

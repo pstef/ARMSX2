@@ -111,12 +111,6 @@ namespace
 	/// The geometry the pair has to share: everything a GSVertex carries except the colour,
 	/// which is the one thing the second stage brings of its own. RGBA sits at offset 8 and Q
 	/// at 12, so the two runs are [0,8) and [12,32).
-	bool VertexIsTwin(const GSVertex& a, const GSVertex& b)
-	{
-		const u8* pa = reinterpret_cast<const u8*>(&a);
-		const u8* pb = reinterpret_cast<const u8*>(&b);
-		return std::memcmp(pa, pb, 8) == 0 && std::memcmp(pa + 12, pb + 12, sizeof(GSVertex) - 12) == 0;
-	}
 } // namespace
 
 bool GSDualFuseLatch::IsHoldable(const GSHWDrawConfig& config)
@@ -270,13 +264,22 @@ bool GSDualFuseLatch::IsTwin(const GSHWDrawConfig& config) const
 	// Same geometry, down to the byte outside the vertex colour.
 	if (std::memcmp(config.indices, m_config.indices, sizeof(u16) * config.nindices) != 0)
 		return false;
-	for (u32 i = 0; i < config.nverts; i++)
-	{
-		if (!VertexIsTwin(config.verts[i], m_config.verts[i]))
-			return false;
-	}
+	return SameGeometryOutsideColour(config.verts, m_config.verts, config.nverts);
+}
 
-	return true;
+bool GSDualFuseLatch::SameGeometryOutsideColour(const GSVertex* a, const GSVertex* b, u32 count)
+{
+	// The differences are or'd across the vertices and tested once, so the loop carries no
+	// branch.
+	static_assert(offsetof(GSVertex, RGBAQ) == 8);
+	const GSVector4i colour_mask = GSVector4i(-1, -1, 0, -1);
+	GSVector4i diff = GSVector4i::zero();
+	for (u32 i = 0; i < count; i++)
+	{
+		diff |= (GSVector4i(a[i].m[0]) ^ GSVector4i(b[i].m[0])) & colour_mask;
+		diff |= GSVector4i(a[i].m[1]) ^ GSVector4i(b[i].m[1]);
+	}
+	return diff.eq(GSVector4i::zero());
 }
 
 GSHWDrawConfig& GSDualFuseLatch::Fuse(const GSHWDrawConfig& twin)

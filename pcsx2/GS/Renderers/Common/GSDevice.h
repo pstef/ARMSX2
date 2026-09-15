@@ -1697,6 +1697,13 @@ protected:
 	void FlushDeferredDrawsImpl();
 	bool DeferredDrawsReference(const GSTexture* tex) const;
 
+public:
+	/// The draw the dual-stage latch holds as a base layer, or null. The renderer reads it to
+	/// recognise the base's twin before repeating the base's lookups (GSRendererHW::TryDrawTwin).
+	const GSHWDrawConfig* HeldDualBase() const;
+
+protected:
+
 	bool AcquireWindow(bool recreate_window);
 
 	virtual GSTexture* CreateSurface(GSTexture::Usage usage, int width, int height, int levels, GSTexture::Format format) = 0;
