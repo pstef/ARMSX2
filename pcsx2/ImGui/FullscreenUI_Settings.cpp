@@ -3438,6 +3438,10 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 			FSUI_CSTR("Groups consecutive draws to the same target into one render pass. Helps on tiling GPUs, where every "
 					  "pass boundary costs a full tile load and store. Rendering is unchanged."),
 			"EmuCore/GS", "CoalesceRenderPasses", false);
+		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_LAYER_GROUP, "Fuse Layered Draws"),
+			FSUI_CSTR("Draws a mesh submitted twice in a row (a base layer, then a second texture over the same geometry) as "
+					  "one draw. Cuts per-draw cost; pixels at exactly the stored depth lose the second layer."),
+			"EmuCore/GS", "FuseLayeredDraws", true);
 		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_BAN, "Disable Shader Cache"), FSUI_CSTR("Prevents the loading and saving of shaders/pipelines to disk."),
 			"EmuCore/GS", "DisableShaderCache", false);
 		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_BAN, "Disable Vertex Shader Expand"), FSUI_CSTR("Falls back to the CPU for expanding sprites/lines."),

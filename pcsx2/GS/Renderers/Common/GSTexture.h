@@ -133,9 +133,10 @@ protected:
 	/// as already-cleared, and restores it at emit. Everything else goes through SetState
 	/// and trips the tripwire.
 	friend class GSPassScheduler;
-	/// Same rewrite, same reason: the depth-fuse latch hides a pending clear for the one
-	/// draw it holds back, and puts it back when that draw is submitted.
+	/// Same rewrite, same reason: the fold latches hide a pending clear for the one draw
+	/// each holds back, and put it back when that draw is submitted.
 	friend class GSDepthFuseLatch;
+	friend class GSDualFuseLatch;
 	__fi void SetStateForDeferral(State state) { m_state = state; }
 
 public:

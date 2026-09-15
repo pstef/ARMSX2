@@ -161,7 +161,8 @@ GSPassScheduler::Disposition GSPassScheduler::TryEnqueue(const GSHWDrawConfig& c
 		}
 	}
 
-	const size_t vertex_bytes = sizeof(GSVertex) * config.nverts;
+	const u32 vertex_units = config.VertexUnits();
+	const size_t vertex_bytes = sizeof(GSVertex) * vertex_units;
 	const size_t index_bytes = sizeof(u16) * config.nindices;
 
 	if (m_queued >= MAX_DRAWS)
@@ -183,7 +184,7 @@ GSPassScheduler::Disposition GSPassScheduler::TryEnqueue(const GSHWDrawConfig& c
 
 	// GSState reuses its vertex and index buffers for the very next draw, so the geometry
 	// has to be taken by value here, not by pointer.
-	m_vertices.resize(m_vertices.size() + config.nverts);
+	m_vertices.resize(m_vertices.size() + vertex_units);
 	std::memcpy(m_vertices.data() + rec.vertex_offset, config.verts, vertex_bytes);
 
 	m_indices.resize(m_indices.size() + config.nindices);

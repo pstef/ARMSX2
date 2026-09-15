@@ -481,6 +481,9 @@ public:
 	enum : u32
 	{
 		NUM_TFX_DYNAMIC_OFFSETS = 2,
+		/// Attribute locations a draw declares out of one GSVertex. A fused pair adds the second
+		/// half's colour at the next location up.
+		NUM_TFX_VERTEX_ATTRIBUTES = 7,
 		NUM_UTILITY_SAMPLERS = 1,
 		CONVERT_PUSH_CONSTANTS_SIZE = 96,
 
@@ -503,6 +506,9 @@ public:
 		TFX_TEXTURE_DEPTH,
 		TFX_TEXTURE_RT_ROV,
 		TFX_TEXTURE_DEPTH_ROV,
+		/// PS_DUAL: the second stage's source texture, sampled through the same VkSampler as
+		/// TFX_TEXTURE_TEXTURE.
+		TFX_TEXTURE_TEXTURE2,
 
 		NUM_TFX_TEXTURES
 	};
@@ -723,6 +729,8 @@ public:
 	bool Create(GSVSyncMode vsync_mode, bool allow_present_throttle) override;
 	void Destroy() override;
 
+	bool SupportsDualStageFusion() const override { return true; }
+
 	bool UpdateWindow() override;
 	void ResizeWindow(u32 new_window_width, u32 new_window_height, float new_window_scale) override;
 	bool SupportsExclusiveFullscreen() const override;
@@ -864,18 +872,19 @@ public:
 private:
 	enum DIRTY_FLAG : u32
 	{
-		DIRTY_FLAG_TFX_TEXTURE_0 = (1 << 0), // 0, 1, 2, 3, 4, 5, 6
-		DIRTY_FLAG_TFX_UBO = (1 << 7),
-		DIRTY_FLAG_UTILITY_TEXTURE = (1 << 8),
-		DIRTY_FLAG_BLEND_CONSTANTS = (1 << 9),
-		DIRTY_FLAG_LINE_WIDTH = (1 << 10),
-		DIRTY_FLAG_INDEX_BUFFER = (1 << 11),
-		DIRTY_FLAG_VIEWPORT = (1 << 12),
-		DIRTY_FLAG_SCISSOR = (1 << 13),
-		DIRTY_FLAG_PIPELINE = (1 << 14),
-		DIRTY_FLAG_VS_CONSTANT_BUFFER = (1 << 15),
-		DIRTY_FLAG_PS_CONSTANT_BUFFER = (1 << 16),
-		DIRTY_FLAG_VS_PUSH_CONSTANTS = (1 << 17),
+		// One bit per TFX texture binding, from bit 0 up, so the rest start above NUM_TFX_TEXTURES.
+		DIRTY_FLAG_TFX_TEXTURE_0 = (1 << 0), // 0, 1, 2, 3, 4, 5, 6, 7
+		DIRTY_FLAG_TFX_UBO = (1 << 8),
+		DIRTY_FLAG_UTILITY_TEXTURE = (1 << 9),
+		DIRTY_FLAG_BLEND_CONSTANTS = (1 << 10),
+		DIRTY_FLAG_LINE_WIDTH = (1 << 11),
+		DIRTY_FLAG_INDEX_BUFFER = (1 << 12),
+		DIRTY_FLAG_VIEWPORT = (1 << 13),
+		DIRTY_FLAG_SCISSOR = (1 << 14),
+		DIRTY_FLAG_PIPELINE = (1 << 15),
+		DIRTY_FLAG_VS_CONSTANT_BUFFER = (1 << 16),
+		DIRTY_FLAG_PS_CONSTANT_BUFFER = (1 << 17),
+		DIRTY_FLAG_VS_PUSH_CONSTANTS = (1 << 18),
 
 		DIRTY_FLAG_TFX_TEXTURE_TEX = (DIRTY_FLAG_TFX_TEXTURE_0 << 0),
 		DIRTY_FLAG_TFX_TEXTURE_PALETTE = (DIRTY_FLAG_TFX_TEXTURE_0 << 1),
@@ -884,11 +893,18 @@ private:
 		DIRTY_FLAG_TFX_TEXTURE_DEPTH = (DIRTY_FLAG_TFX_TEXTURE_0 << 4),
 		DIRTY_FLAG_TFX_TEXTURE_RT_ROV = (DIRTY_FLAG_TFX_TEXTURE_0 << 5),
 		DIRTY_FLAG_TFX_TEXTURE_DEPTH_ROV = (DIRTY_FLAG_TFX_TEXTURE_0 << 6),
+		DIRTY_FLAG_TFX_TEXTURE_TEX2 = (DIRTY_FLAG_TFX_TEXTURE_0 << 7),
 
 		DIRTY_FLAG_TFX_TEXTURES = DIRTY_FLAG_TFX_TEXTURE_TEX | DIRTY_FLAG_TFX_TEXTURE_PALETTE |
 		                          DIRTY_FLAG_TFX_TEXTURE_RT | DIRTY_FLAG_TFX_TEXTURE_PRIMID |
 		                          DIRTY_FLAG_TFX_TEXTURE_DEPTH | DIRTY_FLAG_TFX_TEXTURE_RT_ROV |
-		                          DIRTY_FLAG_TFX_TEXTURE_DEPTH_ROV,
+		                          DIRTY_FLAG_TFX_TEXTURE_DEPTH_ROV | DIRTY_FLAG_TFX_TEXTURE_TEX2,
+
+		// What a rebind of the whole texture set writes, which is every binding except 7: only a
+		// PS_DUAL pipeline samples that one, and a binding the bound pipeline does not statically
+		// use may be left unwritten. The fused draw dirties it for itself, so it is written on
+		// every draw that reads it and on none of the draws that do not.
+		DIRTY_FLAG_TFX_TEXTURES_REBIND = DIRTY_FLAG_TFX_TEXTURES & ~DIRTY_FLAG_TFX_TEXTURE_TEX2,
 
 		DIRTY_BASE_STATE = DIRTY_FLAG_INDEX_BUFFER | DIRTY_FLAG_PIPELINE | DIRTY_FLAG_VIEWPORT | DIRTY_FLAG_SCISSOR |
 		                   DIRTY_FLAG_BLEND_CONSTANTS | DIRTY_FLAG_LINE_WIDTH,

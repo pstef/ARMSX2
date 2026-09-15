@@ -696,7 +696,10 @@ struct alignas(16) GSHWDrawConfig
 				u8 iip : 1;
 				u8 point_size : 1;		///< Set when points need to be expanded without VS expanding.
 				VSExpand expand : 3;
-				u8 _free : 1;
+				/// Second stage of a fused pair: the vertex buffer carries the two halves'
+				/// vertices interleaved at twice the stride, and the extra input is the second
+				/// half's vertex colour. See GSDualFuseLatch.
+				u8 dual : 1;
 			};
 			u8 key;
 		};
@@ -825,6 +828,16 @@ struct alignas(16) GSHWDrawConfig
 				// ROVs
 				u32 rov_color : 1;
 				PS_ROV_DEPTH rov_depth : 2;
+
+				// Second stage of a fused pair: the fragment shader runs the colour path twice,
+				// once per half's texture and vertex colour, puts the second result through the
+				// second half's accumulation blend arm and writes the sum. Every other selector
+				// bit describes both halves. The two that follow are the second half's alone,
+				// because the alpha byte the fused draw stores is the second half's. See
+				// GSDualFuseLatch.
+				u32 dual : 1;
+				u32 dual_fba : 1;
+				u32 dual_rta_correction : 1;
 			};
 
 			struct
@@ -1343,6 +1356,10 @@ struct alignas(16) GSHWDrawConfig
 
 	BlendMultiPass blend_multi_pass;
 
+	/// PS_DUAL: the second stage's source texture, sampled through the same SamplerSelector as
+	/// tex. Cleared by GSRendererHW::ResetStates along with the rest of the block above cb_vs.
+	GSTexture* dual_tex;
+
 	VSConstantBuffer cb_vs;
 	PSConstantBuffer cb_ps;
 	
@@ -1350,6 +1367,14 @@ struct alignas(16) GSHWDrawConfig
 	ColClipMode colclip_mode;
 	GIFRegFRAME colclip_frame;
 	GSVector4i colclip_update_area; ///< Area in the framebuffer which colclip will modify;
+
+	/// Bytes between one vertex and the next in verts. A fused pair carries both halves'
+	/// vertices interleaved, base first, so the array holds 2*nverts GSVertex and the vertex
+	/// input walks it at twice the stride.
+	__fi u32 VertexStride() const { return ps.dual ? (sizeof(GSVertex) * 2) : sizeof(GSVertex); }
+
+	/// GSVertex-sized units verts occupies, which is what a copy of the geometry moves.
+	__fi u32 VertexUnits() const { return ps.dual ? (nverts * 2) : nverts; }
 
 	__fi bool IsFeedbackLoopRT(const PSSelector& ps) const
 	{
@@ -1457,6 +1482,7 @@ static inline u32 GetVertexAlignment(GSHWDrawConfig::VSExpand expand)
 
 class GSPassScheduler;
 class GSDepthFuseLatch;
+class GSDualFuseLatch;
 
 class GSDevice : public GSAlignedClass<32>
 {
@@ -1652,6 +1678,12 @@ protected:
 	/// so the pair can be submitted as one draw. See GSDepthFuseLatch. It is counted into
 	/// m_deferred_draw_count, so every flush wrapper drains it along with the scheduler.
 	std::unique_ptr<GSDepthFuseLatch> m_depth_fuse;
+
+	/// A base-layer draw waiting one RenderHW call to see whether the accumulation layer over
+	/// the same geometry follows, so the pair can be submitted as one draw. See
+	/// GSDualFuseLatch. Counted into m_deferred_draw_count the same way. Null when the fold is
+	/// off, so a draw that could never be held never touches the latch.
+	std::unique_ptr<GSDualFuseLatch> m_dual_fuse;
 
 	/// Renders or defers a draw that the latch has already had its say about.
 	void SubmitRenderHW(GSHWDrawConfig& config);
@@ -1880,6 +1912,11 @@ public:
 
 	virtual bool Create(GSVSyncMode vsync_mode, bool allow_present_throttle);
 	virtual void Destroy();
+
+	/// True when the backend implements the two-stage fused draw: a vertex input at twice the
+	/// stride carrying the second half's colour, a second texture binding, and the PS_DUAL
+	/// shader path. Read once, when the latch is created.
+	virtual bool SupportsDualStageFusion() const { return false; }
 
 	/// Returns the graphics API used by this device.
 	virtual RenderAPI GetRenderAPI() const = 0;

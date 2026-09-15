@@ -5955,6 +5955,7 @@ bool GSDeviceVK::CreatePipelineLayouts()
 	dslb.AddBinding(TFX_TEXTURE_DEPTH, feedback_descriptor_type, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 	dslb.AddBinding(TFX_TEXTURE_RT_ROV, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 	dslb.AddBinding(TFX_TEXTURE_DEPTH_ROV, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+	dslb.AddBinding(TFX_TEXTURE_TEXTURE2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 	if ((m_tfx_texture_ds_layout = dslb.Create(dev)) == VK_NULL_HANDLE)
 		return false;
 	Vulkan::SetObjectName(dev, m_tfx_texture_ds_layout, "TFX texture descriptor layout");
@@ -7257,6 +7258,7 @@ VkShaderModule GSDeviceVK::GetTFXVertexShader(GSHWDrawConfig::VSSelector sel)
 	AddMacro(ss, "VS_IIP", sel.iip);
 	AddMacro(ss, "VS_POINT_SIZE", sel.point_size);
 	AddMacro(ss, "VS_EXPAND", static_cast<int>(sel.expand));
+	AddMacro(ss, "VS_DUAL", sel.dual);
 	AddMacro(ss, "VS_PROVOKING_VERTEX_LAST", static_cast<int>(m_features.provoking_vertex_last));
 	ss << m_tfx_source;
 
@@ -7343,6 +7345,9 @@ VkShaderModule GSDeviceVK::GetTFXFragmentShader(const GSHWDrawConfig::PSSelector
 	AddMacro(ss, "PS_ANISOTROPIC_FILTERING", sel.sw_aniso);
 	AddMacro(ss, "PS_ROV_COLOR", sel.rov_color);
 	AddMacro(ss, "PS_ROV_DEPTH", static_cast<u32>(sel.rov_depth));
+	AddMacro(ss, "PS_DUAL", sel.dual);
+	AddMacro(ss, "PS_DUAL_FBA", sel.dual_fba);
+	AddMacro(ss, "PS_DUAL_RTA_CORRECTION", sel.dual_rta_correction);
 	ss << m_tfx_source;
 
 	VkShaderModule mod = g_vulkan_shader_cache->GetFragmentShader(ss.str());
@@ -7429,7 +7434,9 @@ VkPipeline GSDeviceVK::CreateTFXPipeline(const PipelineSelector& p)
 	// IA
 	if (p.vs.expand == GSHWDrawConfig::VSExpand::None)
 	{
-		gpb.AddVertexBuffer(0, sizeof(GSVertex));
+		// A fused pair walks one binding at twice the stride: the two halves' vertices
+		// alternate, and the only thing read out of the second is its colour.
+		gpb.AddVertexBuffer(0, p.vs.dual ? (sizeof(GSVertex) * 2) : sizeof(GSVertex));
 		gpb.AddVertexAttribute(0, 0, VK_FORMAT_R32G32_SFLOAT, 0); // ST
 		gpb.AddVertexAttribute(1, 0, VK_FORMAT_R8G8B8A8_UINT, 8); // RGBA
 		gpb.AddVertexAttribute(2, 0, VK_FORMAT_R32_SFLOAT, 12); // Q
@@ -7437,6 +7444,8 @@ VkPipeline GSDeviceVK::CreateTFXPipeline(const PipelineSelector& p)
 		gpb.AddVertexAttribute(4, 0, VK_FORMAT_R32_UINT, 20); // Z
 		gpb.AddVertexAttribute(5, 0, VK_FORMAT_R16G16_UINT, 24); // UV
 		gpb.AddVertexAttribute(6, 0, VK_FORMAT_R8G8B8A8_UNORM, 28); // FOG
+		if (p.vs.dual)
+			gpb.AddVertexAttribute(NUM_TFX_VERTEX_ATTRIBUTES, 0, VK_FORMAT_R8G8B8A8_UINT, sizeof(GSVertex) + 8); // RGBA of the second half
 	}
 
 	// DepthStencil
@@ -8222,7 +8231,7 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 	if (m_current_pipeline_layout != PipelineLayout::TFX)
 	{
 		m_current_pipeline_layout = PipelineLayout::TFX;
-		flags |= DIRTY_FLAG_TFX_UBO | DIRTY_FLAG_TFX_TEXTURES | DIRTY_FLAG_VS_PUSH_CONSTANTS;
+		flags |= DIRTY_FLAG_TFX_UBO | DIRTY_FLAG_TFX_TEXTURES_REBIND | DIRTY_FLAG_VS_PUSH_CONSTANTS;
 
 		// Clear out the RT/DS binding if feedback loop isn't on, because it'll be in the wrong state and make
 		// the validation layer cranky. Not a big deal since we need to write it anyway.
@@ -8250,12 +8259,12 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 		VkDescriptorSet ds = VK_NULL_HANDLE;
 		// Non-push path allocates a fresh (empty) descriptor set, so every binding the
 		// shader may read must be written — not just the dirty ones (push descriptors
-		// persist the rest in command-buffer state; allocated sets do not). Force all
-		// texture sub-flags on; all m_tfx_textures[] slots are always valid (null slots
-		// hold m_null_texture), so this is safe.
+		// persist the rest in command-buffer state; allocated sets do not). Force the
+		// rebind set on; all m_tfx_textures[] slots are always valid (null slots hold
+		// m_null_texture), so this is safe.
 		if (!m_use_push_descriptors)
 		{
-			flags |= DIRTY_FLAG_TFX_TEXTURES;
+			flags |= DIRTY_FLAG_TFX_TEXTURES_REBIND;
 			ds = AllocateDescriptorSetFromFramePool(m_tfx_texture_ds_layout);
 			if (ds == VK_NULL_HANDLE) [[unlikely]]
 			{
@@ -8323,6 +8332,12 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 		{
 			dsub.AddImageDescriptorWrite(ds, TFX_TEXTURE_DEPTH_ROV, m_tfx_textures[TFX_TEXTURE_DEPTH_ROV]->GetView(),
 				m_tfx_textures[TFX_TEXTURE_DEPTH_ROV]->GetVkLayout(), true);
+		}
+		if (flags & DIRTY_FLAG_TFX_TEXTURE_TEX2)
+		{
+			dsub.AddCombinedImageSamplerDescriptorWrite(ds, TFX_TEXTURE_TEXTURE2,
+				m_tfx_textures[TFX_TEXTURE_TEXTURE2]->GetView(), m_tfx_sampler,
+				m_tfx_textures[TFX_TEXTURE_TEXTURE2]->GetVkLayout());
 		}
 
 		if (m_use_push_descriptors)
@@ -8595,6 +8610,13 @@ void GSDeviceVK::DoRenderHW(GSHWDrawConfig& config)
 	}
 	if (config.pal)
 		PSSetShaderResource(TFX_TEXTURE_PALETTE, config.pal, true);
+	if (config.ps.dual)
+	{
+		// Binding 7 is outside the rebind set, so a draw that samples it has to ask for the
+		// write even when the texture has not changed: a rebind in between left it unwritten.
+		PSSetShaderResource(TFX_TEXTURE_TEXTURE2, config.dual_tex, true);
+		m_dirty_flags |= DIRTY_FLAG_TFX_TEXTURE_TEX2;
+	}
 
 	if (config.blend.constant_enable)
 		SetBlendConstants(config.blend.constant);
@@ -9158,7 +9180,7 @@ void GSDeviceVK::UpdateHWPipelineSelector(GSHWDrawConfig& config, PipelineSelect
 
 void GSDeviceVK::UploadHWDrawVerticesAndIndices(GSHWDrawConfig& config)
 {
-	IASetVertexBuffer(config.verts, sizeof(GSVertex), config.nverts, GetVertexAlignment(config.vs.expand));
+	IASetVertexBuffer(config.verts, config.VertexStride(), config.nverts, GetVertexAlignment(config.vs.expand));
 
 	if (config.vs.UseFixedExpandIndexBuffer())
 	{

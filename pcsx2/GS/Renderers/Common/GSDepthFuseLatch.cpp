@@ -11,50 +11,41 @@ GSDepthFuseLatch::GSDepthFuseLatch() = default;
 
 GSDepthFuseLatch::~GSDepthFuseLatch() = default;
 
-namespace
+bool GSIsFusableDrawHalf(const GSHWDrawConfig& config)
 {
-	/// The parts of the predicate both halves have to satisfy. Anything here either moves
-	/// the draw's position in the stream from a detail to a semantic (a barrier, a feedback
-	/// loop, colour clipping, destination alpha), splits it into more than one submission
-	/// (a second pass, a drawlist), or lets the fragment shader decline to write a pixel -
-	/// and a fold keeps one shader for both halves, so a discard in either one lands on the
-	/// wrong set of pixels.
-	bool IsFusableHalf(const GSHWDrawConfig& config)
-	{
-		if (config.require_one_barrier || config.require_full_barrier)
-			return false;
-		if (config.tex_hazard != GSHWDrawConfig::TEX_HAZARD_NONE)
-			return false;
-		if (config.ps.IsFeedbackLoopRT() || config.ps.IsFeedbackLoopDepth() || config.ps.tex_is_fb)
-			return false;
-		if (config.destination_alpha != GSHWDrawConfig::DestinationAlphaMode::Off)
-			return false;
-		if (config.depth.date || config.depth.date_one)
-			return false;
-		if (config.colclip_mode != GSHWDrawConfig::ColClipMode::NoModify)
-			return false;
-		if (config.alpha_test != GSHWDrawConfig::AlphaTestMode::NONE)
-			return false;
-		if (config.alpha_second_pass.enable || config.blend_multi_pass.enable)
-			return false;
-		if (config.drawlist || config.drawlist_bbox)
-			return false;
-		if (config.ps.HasShaderDiscard())
-			return false;
+	if (config.require_one_barrier || config.require_full_barrier)
+		return false;
+	if (config.tex_hazard != GSHWDrawConfig::TEX_HAZARD_NONE)
+		return false;
+	if (config.ps.IsFeedbackLoopRT() || config.ps.IsFeedbackLoopDepth() || config.ps.tex_is_fb)
+		return false;
+	if (config.destination_alpha != GSHWDrawConfig::DestinationAlphaMode::Off)
+		return false;
+	if (config.depth.date || config.depth.date_one)
+		return false;
+	if (config.colclip_mode != GSHWDrawConfig::ColClipMode::NoModify)
+		return false;
+	if (config.alpha_test != GSHWDrawConfig::AlphaTestMode::NONE)
+		return false;
+	if (config.alpha_second_pass.enable || config.blend_multi_pass.enable)
+		return false;
+	if (config.drawlist || config.drawlist_bbox)
+		return false;
+	if (config.ps.HasShaderDiscard())
+		return false;
 
-		// Interlocked access orders the two halves against each other inside the shader, so
-		// the pair is not two independent draws to begin with.
-		if (config.ps.rov_color || config.ps.rov_depth != GSHWDrawConfig::PS_ROV_DEPTH::NONE)
-			return false;
+	// Interlocked access orders the two halves against each other inside the shader, so
+	// the pair is not two independent draws to begin with.
+	if (config.ps.rov_color || config.ps.rov_depth != GSHWDrawConfig::PS_ROV_DEPTH::NONE)
+		return false;
 
-		// AA1 turns coverage into alpha and, on triangles, into a depth discard; it also
-		// makes a line cover pixels twice where the expanded quads meet.
-		if (config.ps.aa1 != GSHWDrawConfig::PS_AA1::NONE)
-			return false;
+	// AA1 turns coverage into alpha and, on triangles, into a depth discard; it also
+	// makes a line cover pixels twice where the expanded quads meet.
+	if (config.ps.aa1 != GSHWDrawConfig::PS_AA1::NONE)
+		return false;
 
-		return true;
-	}
-} // namespace
+	return true;
+}
 
 bool GSDepthFuseLatch::IsHoldable(const GSHWDrawConfig& config)
 {
@@ -77,7 +68,7 @@ bool GSDepthFuseLatch::IsHoldable(const GSHWDrawConfig& config)
 	if (config.tex == config.rt || config.tex == config.ds)
 		return false;
 
-	if (!IsFusableHalf(config))
+	if (!GSIsFusableDrawHalf(config))
 		return false;
 
 	// One primitive. With two, enabling depth writes lets the first one's stored depth fail
@@ -128,7 +119,7 @@ bool GSDepthFuseLatch::IsTwin(const GSHWDrawConfig& config) const
 	if (!config.depth.zwe || config.depth.ztst != m_config.depth.ztst)
 		return false;
 
-	if (!IsFusableHalf(config))
+	if (!GSIsFusableDrawHalf(config))
 		return false;
 
 	// Sampling either attachment of the draw it is about to be folded into.

@@ -944,6 +944,12 @@ struct Pcsx2Config
 					// where every pass boundary is a full tile load and store. Hot-
 					// appliable: turning it off just stops deferring.
 					CoalesceRenderPasses : 1,
+					// Fold a mesh submitted twice in a row -- a base layer, then the same
+					// geometry with a second texture added over it -- into one draw with both
+					// layers in the fragment shader (GSDualFuseLatch). Hot-appliable: turning
+					// it off just stops holding draws back. Not pixel-exact where a fragment's
+					// depth equals the stored depth; the latch's header says why.
+					FuseLayeredDraws : 1,
 					ManualUserHacks : 1,
 					UserHacks_AlignSpriteX : 1,
 					UserHacks_CPUFBConversion : 1,

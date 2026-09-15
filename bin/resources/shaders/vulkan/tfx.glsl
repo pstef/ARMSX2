@@ -27,6 +27,10 @@ layout(std140, set = 0, binding = 0) uniform cb0
 	float LineAA1Width;
 };
 
+#ifndef VS_DUAL
+#define VS_DUAL 0
+#endif
+
 layout(location = 0) out VSOutput
 {
 	vec4 t;
@@ -36,6 +40,15 @@ layout(location = 0) out VSOutput
 		vec4 c;
 	#else
 		flat vec4 c;
+	#endif
+
+	#if VS_DUAL
+		// The second stage's vertex colour, interpolated exactly as the first one is.
+		#if VS_IIP != 0
+			vec4 c2;
+		#else
+			flat vec4 c2;
+		#endif
 	#endif
 
 	float inv_cov; // We use the inverse to make it simpler to interpolate.
@@ -51,6 +64,11 @@ layout(location = 3) in uvec2 a_p;
 layout(location = 4) in uint a_z;
 layout(location = 5) in uvec2 a_uv;
 layout(location = 6) in vec4 a_f;
+#if VS_DUAL
+// The vertex buffer carries the pair interleaved at twice the stride, so the second half's
+// colour is one GSVertex further into the same element.
+layout(location = 7) in uvec4 a_c2;
+#endif
 
 void main()
 {
@@ -101,6 +119,9 @@ void main()
 	#endif
 
 	vsOut.c = vec4(a_c);
+#if VS_DUAL
+	vsOut.c2 = vec4(a_c2);
+#endif
 	vsOut.t.z = a_f.r;
 }
 
@@ -598,6 +619,12 @@ void main()
 #define PS_ROV_DEPTH 0
 #endif
 
+#ifndef PS_DUAL
+#define PS_DUAL 0
+#define PS_DUAL_FBA 0
+#define PS_DUAL_RTA_CORRECTION 0
+#endif
+
 #define SW_BLEND (PS_BLEND_A || PS_BLEND_B || PS_BLEND_D)
 #define SW_BLEND_NEEDS_RT (SW_BLEND && (PS_BLEND_A == 1 || PS_BLEND_B == 1 || PS_BLEND_C == 1 || PS_BLEND_D == 1))
 #define SW_AD_TO_HW (PS_BLEND_C == 1 && PS_A_MASKED)
@@ -655,6 +682,13 @@ layout(location = 0) in VSOutput
 	#else
 		flat vec4 c;
 	#endif
+	#if PS_DUAL
+		#if PS_IIP != 0
+			vec4 c2;
+		#else
+			flat vec4 c2;
+		#endif
+	#endif
 	float inv_cov; // We use the inverse to make it simpler to interpolate.
 	flat uint interior; // 1 for triangle interior; 0 for edge;
 } vsIn;
@@ -685,6 +719,11 @@ layout(location = 0) in VSOutput
 #if NEEDS_TEX
 layout(set = 1, binding = 0) uniform sampler2D Texture;
 layout(set = 1, binding = 1) uniform texture2D Palette;
+// The second stage's texture. The sampling functions below take the image as a parameter, so the
+// two stages run the same code; only a PS_DUAL pipeline declares this binding.
+#if PS_DUAL
+layout(set = 1, binding = 7) uniform sampler2D Texture2;
+#endif
 #endif
 
 #if PS_FEEDBACK_LOOP_IS_NEEDED_RT || PS_FEEDBACK_LOOP_IS_NEEDED_DEPTH
@@ -743,7 +782,7 @@ float manual_lod(float uv_w)
 #endif
 
 #if PS_ANISOTROPIC_FILTERING > 1
-vec4 sample_c_af(vec2 uv, float uv_w)
+vec4 sample_c_af(sampler2D tex, vec2 uv, float uv_w)
 {
 	// HW sampler will reject bad UVs, match that here.
 	uv = (any(isnan(uv)) || any(isinf(uv))) ? vec2(0.0f, 0.0f) : uv;
@@ -755,7 +794,7 @@ vec4 sample_c_af(vec2 uv, float uv_w)
 	// Below taken from https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm#7.18.11%20LOD%20Calculations
 	// And https://registry.khronos.org/OpenGL/extensions/EXT/EXT_texture_filter_anisotropic.txt
 	// With guidance from https://pema.dev/2025/05/09/mipmaps-too-much-detail/ 
-	vec2 sz = textureSize(Texture, 0);
+	vec2 sz = textureSize(tex, 0);
 	vec2 dX = dFdx(uv) * sz;
 	vec2 dY = dFdy(uv) * sz;
 
@@ -854,7 +893,7 @@ vec4 sample_c_af(vec2 uv, float uv_w)
 
 	vec4 colour;
 	if (aniso_ratio == 1.0f)
-		colour = textureLod(Texture, uv, lod);
+		colour = textureLod(tex, uv, lod);
 	else
 	{
 		vec4 num = vec4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -863,7 +902,7 @@ vec4 sample_c_af(vec2 uv, float uv_w)
 		{
 			vec2 d = -aniso_line + (0.5f + i) * segment;	
 			vec2 uv_sample = uv + d;
-			vec4 sample_colour = textureLod(Texture, uv_sample, lod);
+			vec4 sample_colour = textureLod(tex, uv_sample, lod);
 			num += sample_colour;
 		}
 
@@ -873,12 +912,15 @@ vec4 sample_c_af(vec2 uv, float uv_w)
 }
 #endif
 
-vec4 sample_c(vec2 uv)
+// [tex] is the stage's image, so the second stage of a fused pair runs this body with Texture2.
+// The trap: PS_TEX_IS_FB ignores [tex] and reads the render target. The fold refuses a pair that
+// sets it.
+vec4 sample_c(sampler2D tex, vec2 uv)
 {
 #if PS_TEX_IS_FB
 	return sample_from_rt();
 #elif PS_REGION_RECT
-	return texelFetch(Texture, ivec2(uv), 0);
+	return texelFetch(tex, ivec2(uv), 0);
 #else
 
 #if !PS_ADJS && !PS_ADJT
@@ -897,13 +939,13 @@ vec4 sample_c(vec2 uv)
 #endif
 
 #if PS_ANISOTROPIC_FILTERING > 1
-	return sample_c_af(uv, vsIn.t.w);
+	return sample_c_af(tex, uv, vsIn.t.w);
 #elif PS_AUTOMATIC_LOD == 1
-	return texture(Texture, uv);
+	return texture(tex, uv);
 #elif PS_MANUAL_LOD == 1
-	return textureLod(Texture, uv, manual_lod(vsIn.t.w));
+	return textureLod(tex, uv, manual_lod(vsIn.t.w));
 #else
-	return textureLod(Texture, uv, 0); // No lod
+	return textureLod(tex, uv, 0); // No lod
 #endif
 #endif
 }
@@ -1000,26 +1042,26 @@ vec4 clamp_wrap_uv(vec4 uv)
 	return uv;
 }
 
-mat4 sample_4c(vec4 uv)
+mat4 sample_4c(sampler2D tex, vec4 uv)
 {
 	mat4 c;
 
-	c[0] = sample_c(uv.xy);
-	c[1] = sample_c(uv.zy);
-	c[2] = sample_c(uv.xw);
-	c[3] = sample_c(uv.zw);
+	c[0] = sample_c(tex, uv.xy);
+	c[1] = sample_c(tex, uv.zy);
+	c[2] = sample_c(tex, uv.xw);
+	c[3] = sample_c(tex, uv.zw);
 
 	return c;
 }
 
-uvec4 sample_4_index(vec4 uv)
+uvec4 sample_4_index(sampler2D tex, vec4 uv)
 {
 	vec4 c;
 
-	c.x = sample_c(uv.xy).a;
-	c.y = sample_c(uv.zy).a;
-	c.z = sample_c(uv.xw).a;
-	c.w = sample_c(uv.zw).a;
+	c.x = sample_c(tex, uv.xy).a;
+	c.y = sample_c(tex, uv.zy).a;
+	c.z = sample_c(tex, uv.xw).a;
+	c.w = sample_c(tex, uv.zw).a;
 
 	// Denormalize value
 
@@ -1276,7 +1318,10 @@ vec4 fetch_gXbY(ivec2 xy)
 	#endif
 }
 
-vec4 sample_color(vec2 st)
+// [tex] is the stage's image; the second stage of a fused pair runs this with Texture2. The
+// palette road is unreachable there - the fold refuses a pair whose CLUT is applied in the
+// shader, so each half samples its own expanded texture through the one Palette binding.
+vec4 sample_color(sampler2D tex, vec2 st)
 {
 	#if PS_TCOFFSETHACK
 	st += TC_OffsetHack.xy;
@@ -1288,7 +1333,7 @@ vec4 sample_color(vec2 st)
 
 	#if PS_LTF == 0 && PS_AEM_FMT == FMT_32 && PS_PAL_FMT == 0 && PS_REGION_RECT == 0 && PS_WMS < 2 && PS_WMT < 2
 	{
-		c[0] = sample_c(st);
+		c[0] = sample_c(tex, st);
 	}
 	#else
 	{
@@ -1314,9 +1359,9 @@ vec4 sample_color(vec2 st)
 		uv = clamp_wrap_uv(uv);
 
 #if PS_PAL_FMT != 0
-			c = sample_4p(sample_4_index(uv));
+			c = sample_4p(sample_4_index(tex, uv));
 #else
-			c = sample_4c(uv);
+			c = sample_4c(tex, uv);
 #endif
 	}
 	#endif
@@ -1441,7 +1486,7 @@ vec4 ps_color()
 #elif PS_DEPTH_FMT > 0
 	vec4 T = sample_depth(st_int, ivec2(gl_FragCoord.xy));
 #else
-	vec4 T = sample_color(st);
+	vec4 T = sample_color(Texture, st);
 #endif
 
 	#if PS_SHUFFLE && !PS_READ16_SRC && !PS_SHUFFLE_SAME && !(PS_PROCESS_BA == SHUFFLE_READWRITE && PS_PROCESS_RG == SHUFFLE_READWRITE)
@@ -1467,6 +1512,29 @@ vec4 ps_color()
 
 	return C;
 }
+
+#if PS_DUAL
+// The second stage's colour: the first stage's path with the second half's texture, vertex colour
+// and fog colour. The roads ps_color takes for a channel fetch, a depth format or a shuffle are
+// absent because the fold refuses a pair whose selector asks for one.
+vec4 ps_color_dual()
+{
+#if PS_FST == 0
+	vec2 st = vsIn.t.xy / vsIn.t.w;
+#else
+	vec2 st = vsIn.ti.xy;
+#endif
+
+	vec4 C = tfx(sample_color(Texture2, st), vsIn.c2);
+
+#if PS_FOG
+	// The second layer's fog colour rides in the dither matrix, which a fused draw never uses.
+	C.rgb = trunc(mix(DitherMatrix[0].xyz, C.rgb, (vsIn.t.z * 255.0f) / 256.0f));
+#endif
+
+	return C;
+}
+#endif
 
 // The masked-write road turns the colour into integers before merging the destination in, and it
 // does that on all four channels, not only the masked ones. So a draw carrying an FBMSK writes a
@@ -1966,6 +2034,26 @@ void main()
 
 	ps_fbmask(C);
 
+	#if PS_DUAL
+	// The second stage, run on this fragment as the second draw of the pair would have run it:
+	// its own colour, its own alpha fixup, then its accumulation arm. That arm is (Cs - 0)*As + 0
+	// with As the stage's own alpha, which is what the fold pins blend_a..d to, and the clamp is
+	// the one ps_color_clamp_wrap applies to a software-blended colour.
+	vec4 C_dual = ps_color_dual();
+	float As_dual = C_dual.a / 128.0f;
+
+	#if (PS_DST_FMT == FMT_16)
+		C_dual.a = (PS_DUAL_FBA != 0) ? 128.0f : step(128.0f, C_dual.a) * 128.0f;
+	#elif (PS_DST_FMT == FMT_32) && (PS_DUAL_FBA != 0)
+		if (C_dual.a < 128.0f) C_dual.a += 128.0f;
+	#endif
+
+	C_dual.rgb = clamp(trunc(C_dual.rgb * As_dual), vec3(0.0f), vec3(255.0f));
+	#if PS_DST_FMT == FMT_16
+		C_dual.rgb = vec3(gpu_bitwise_and(ivec3(C_dual.rgb), ivec3(0xF8)));
+	#endif
+	#endif
+
 	#if (PS_AFAIL == AFAIL_RGB_ONLY_DSB) && !PS_NO_COLOR1
 		// Use alpha blend factor to determine whether to update A.
 		alpha_blend.a = float(atst_pass);
@@ -1973,20 +2061,34 @@ void main()
 
 	// Output color scaling
 	#if !PS_NO_COLOR
-		#if PS_BLEND_FACTOR_IN_ALPHA
-			// No dual-source blend unit here. Nothing is keeping this pass's alpha, so hand the
-			// blend factor to fixed-function SRC_ALPHA through it instead of a second output.
-			o_col0.a = alpha_blend.a;
-		#elif PS_RTA_CORRECTION
-			o_col0.a = C.a / 128.0f;
+		#if PS_DUAL
+			// One store for what the pair stored in two. Both terms are integers and the first
+			// stage's is already inside [0, 255], so clamping the sum at the store is the clamp
+			// the second of the two stores applied. Alpha is the second stage's: its blend wrote
+			// source alpha over whatever the first stage left.
+			#if PS_DUAL_RTA_CORRECTION
+				o_col0.a = C_dual.a / 128.0f;
+			#else
+				o_col0.a = C_dual.a / 255.0f;
+			#endif
+			o_col0.rgb = (C.rgb + C_dual.rgb) / 255.0f;
 		#else
-			o_col0.a = C.a / 255.0f;
-		#endif
-		#if PS_COLCLIP_HW == 1
-			o_col0.rgb = vec3(C.rgb / 65535.0f);
-		#else
-			o_col0.rgb = C.rgb / 255.0f;
-		#endif
+			#if PS_BLEND_FACTOR_IN_ALPHA
+				// No dual-source blend unit here. Nothing is keeping this pass's alpha, so hand
+				// the blend factor to fixed-function SRC_ALPHA through it instead of a second
+				// output.
+				o_col0.a = alpha_blend.a;
+			#elif PS_RTA_CORRECTION
+				o_col0.a = C.a / 128.0f;
+			#else
+				o_col0.a = C.a / 255.0f;
+			#endif
+			#if PS_COLCLIP_HW == 1
+				o_col0.rgb = vec3(C.rgb / 65535.0f);
+			#else
+				o_col0.rgb = C.rgb / 255.0f;
+			#endif
+		#endif // PS_DUAL
 		#if !PS_NO_COLOR1
 			o_col1 = alpha_blend;
 		#endif

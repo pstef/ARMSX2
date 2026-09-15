@@ -789,6 +789,7 @@ Pcsx2Config::GSOptions::GSOptions()
 	HWROVLogging = false;
 	HWROVBarriersVK = false;
 	CoalesceRenderPasses = false;
+	FuseLayeredDraws = true;
 
 	ManualUserHacks = false;
 	UserHacks_AlignSpriteX = false;
@@ -1136,6 +1137,7 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(HWROVLogging);
 	SettingsWrapBitBool(HWROVBarriersVK);
 	SettingsWrapBitBool(CoalesceRenderPasses);
+	SettingsWrapBitBool(FuseLayeredDraws);
 	SettingsWrapIntEnumEx(AccurateBlendingUnit, "accurate_blending_unit");
 	SettingsWrapIntEnumEx(TextureFiltering, "filter");
 	SettingsWrapIntEnumEx(TexturePreloading, "texture_preloading");

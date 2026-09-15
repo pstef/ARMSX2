@@ -351,6 +351,8 @@ struct FrameSample
 	u64 hash_cache_miss;
 	u64 pipeline_switches;
 
+	u64 dual_fused_pairs;
+
 	/// Process resident set size in kB at the end of this frame. Per frame rather than
 	/// once at the end because the shape is the finding: a run that leaks and a run that
 	/// merely started big have the same closing figure and different curves, and a
@@ -387,6 +389,8 @@ static double s_last_hash_cache_hit = 0;
 static double s_last_hash_cache_miss = 0;
 static double s_last_pipeline_switches = 0;
 static u64 s_total_pipeline_switches = 0;
+static double s_last_dual_fused_pairs = 0;
+static u64 s_total_dual_fused_pairs = 0;
 
 static u64 s_total_prims = 0;
 static u64 s_total_tc_source_hit = 0;
@@ -716,6 +720,8 @@ void Host::BeginPresentFrame()
 		sample.hash_cache_hit = update_stat(GSPerfMon::HashCacheHit, s_total_hash_cache_hit, s_last_hash_cache_hit);
 		sample.hash_cache_miss = update_stat(GSPerfMon::HashCacheMiss, s_total_hash_cache_miss, s_last_hash_cache_miss);
 		sample.pipeline_switches = update_stat(GSPerfMon::PipelineSwitches, s_total_pipeline_switches, s_last_pipeline_switches);
+		sample.dual_fused_pairs =
+			update_stat(GSPerfMon::DualFusedPairs, s_total_dual_fused_pairs, s_last_dual_fused_pairs);
 
 		// A frame is drawn if it carried PS2 draws. The upstream heuristic also counted a
 		// frame with only texture uploads as drawn; under Tile every present-only frame
@@ -1971,6 +1977,7 @@ static void WriteStatsJson(const std::string& path)
 	std::fprintf(fp.get(), "    \"hash_cache_hit\": %" PRIu64 ",\n    \"hash_cache_miss\": %" PRIu64 ",\n",
 		s_total_hash_cache_hit, s_total_hash_cache_miss);
 	std::fprintf(fp.get(), "    \"pipeline_switches\": %" PRIu64 ",\n", s_total_pipeline_switches);
+	std::fprintf(fp.get(), "    \"dual_fused_pairs\": %" PRIu64 ",\n", s_total_dual_fused_pairs);
 	std::fprintf(fp.get(), "    \"gpu_blocking_waits\": %" PRIu64 ",\n", s_total_gpu_blocking_waits);
 	std::fprintf(fp.get(), "    \"gs_cpu_ms\": %.3f,\n    \"gs_cpu_us_per_draw\": %.3f,\n    \"gs_cpu_us_per_draw_call\": %.3f,\n",
 		gs_cpu_ms_total, gs_cpu_us_per_draw, gs_cpu_us_per_draw_call);
@@ -2044,6 +2051,7 @@ void GSRunner::DumpStats()
 		s_total_render_pass_area_pixels / 1e6,
 		s_total_render_pass_area_pixels / 1e6 / static_cast<double>(s_total_drawn_frames)));
 	Console.WriteLn(fmt::format("@HWSTAT@ Pipeline Switches: {} (avg {})", s_total_pipeline_switches, static_cast<u64>(std::ceil(s_total_pipeline_switches / static_cast<double>(s_total_drawn_frames)))));
+	Console.WriteLn(fmt::format("@HWSTAT@ Dual Fused Pairs: {} (avg {})", s_total_dual_fused_pairs, static_cast<u64>(std::ceil(s_total_dual_fused_pairs / static_cast<double>(s_total_drawn_frames)))));
 	Console.WriteLn(fmt::format("@HWSTAT@ Barriers: {} (avg {})", s_total_barriers, static_cast<u64>(std::ceil(s_total_barriers / static_cast<double>(s_total_drawn_frames)))));
 	Console.WriteLn(fmt::format("@HWSTAT@ Copies: {} (avg {})", s_total_copies, static_cast<u64>(std::ceil(s_total_copies / static_cast<double>(s_total_drawn_frames)))));
 	Console.WriteLn(fmt::format("@HWSTAT@ Uploads: {} (avg {})", s_total_uploads, static_cast<u64>(std::ceil(s_total_uploads / static_cast<double>(s_total_drawn_frames)))));

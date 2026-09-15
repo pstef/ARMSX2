@@ -5,6 +5,14 @@
 
 #include "GS/Renderers/Common/GSDevice.h"
 
+/// What either half of any fold has to satisfy, whichever fold is asking. Anything rejected here
+/// either moves the draw's position in the stream from a detail to a semantic (a barrier, a
+/// feedback loop, colour clipping, destination alpha), splits it into more than one submission
+/// (a second pass, a drawlist), or lets the fragment shader decline to write a pixel - and a
+/// fold keeps one shader for both halves, so a discard in either one lands on the wrong set of
+/// pixels.
+bool GSIsFusableDrawHalf(const GSHWDrawConfig& config);
+
 /// Holds one colour draw back for the length of a single RenderHW call, so that a
 /// depth-only draw of the same geometry arriving immediately behind it can be folded into
 /// it instead of submitted on its own.

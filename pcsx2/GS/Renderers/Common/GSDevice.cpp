@@ -6,6 +6,7 @@
 #include "EmbeddedResources.h"
 #endif
 #include "GS/Renderers/Common/GSDepthFuseLatch.h"
+#include "GS/Renderers/Common/GSDualFuseLatch.h"
 #include "GS/Renderers/Common/GSPassScheduler.h"
 #include "GS/GSGL.h"
 #include "GS/GS.h"
@@ -450,6 +451,12 @@ bool GSDevice::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 {
 	m_vsync_mode = vsync_mode;
 	m_allow_present_throttle = allow_present_throttle;
+
+	// Null on a backend without the dual-stage shader path. Every use of the latch is behind
+	// this pointer; whether it holds anything is GSConfig.FuseLayeredDraws, read per draw.
+	if (SupportsDualStageFusion())
+		m_dual_fuse = std::make_unique<GSDualFuseLatch>();
+
 	return true;
 }
 
@@ -459,6 +466,7 @@ void GSDevice::Destroy()
 	// are about to be destroyed.
 	m_pass_scheduler->Clear();
 	m_depth_fuse->Clear();
+	m_dual_fuse.reset();
 	m_deferred_draw_count = 0;
 
 	// Nothing references these any more, and PurgePool() below deletes whatever the pool
@@ -1162,6 +1170,8 @@ void GSDevice::RenderHW(GSHWDrawConfig& config)
 	// will tear the temporary target down as soon as we return.
 	if (!m_flushing)
 	{
+		// At most one latch holds at a time: a hold is always resolved on the next call
+		// through here, and both are drained by the same flush.
 		if (m_depth_fuse->IsHeld())
 		{
 			if (m_depth_fuse->IsTwin(config))
@@ -1180,12 +1190,39 @@ void GSDevice::RenderHW(GSHWDrawConfig& config)
 			UpdateDeferredDrawCount();
 			SubmitRenderHW(held);
 		}
-
-		if (!IsDSInRTActive() && GSDepthFuseLatch::IsHoldable(config))
+		else if (m_dual_fuse && m_dual_fuse->IsHeld())
 		{
-			m_depth_fuse->Hold(config);
+			if (m_dual_fuse->IsTwin(config))
+			{
+				GSHWDrawConfig& fused = m_dual_fuse->Fuse(config);
+				UpdateDeferredDrawCount();
+				SubmitRenderHW(fused);
+				return;
+			}
+
+			GSHWDrawConfig& held = m_dual_fuse->Release();
 			UpdateDeferredDrawCount();
-			return;
+			SubmitRenderHW(held);
+		}
+
+		if (!IsDSInRTActive())
+		{
+			// The depth fold gets first refusal: its twin is a depth-only draw and the dual
+			// fold's is a second colour draw, so a draw held by the wrong one is not folded
+			// at all.
+			if (GSDepthFuseLatch::IsHoldable(config))
+			{
+				m_depth_fuse->Hold(config);
+				UpdateDeferredDrawCount();
+				return;
+			}
+
+			if (m_dual_fuse && GSConfig.FuseLayeredDraws && GSDualFuseLatch::IsHoldable(config))
+			{
+				m_dual_fuse->Hold(config);
+				UpdateDeferredDrawCount();
+				return;
+			}
 		}
 	}
 
@@ -1223,12 +1260,14 @@ void GSDevice::SubmitRenderHW(GSHWDrawConfig& config)
 
 void GSDevice::UpdateDeferredDrawCount()
 {
-	m_deferred_draw_count = m_pass_scheduler->GetCount() + (m_depth_fuse->IsHeld() ? 1u : 0u);
+	m_deferred_draw_count = m_pass_scheduler->GetCount() + (m_depth_fuse->IsHeld() ? 1u : 0u) +
+							((m_dual_fuse && m_dual_fuse->IsHeld()) ? 1u : 0u);
 }
 
 bool GSDevice::DeferredDrawsReference(const GSTexture* tex) const
 {
-	return m_pass_scheduler->References(tex) || m_depth_fuse->References(tex);
+	return m_pass_scheduler->References(tex) || m_depth_fuse->References(tex) ||
+		   (m_dual_fuse && m_dual_fuse->References(tex));
 }
 
 void GSDevice::FlushDeferredDrawsImpl()
@@ -1241,6 +1280,8 @@ void GSDevice::FlushDeferredDrawsImpl()
 	// the scheduler drains it first - so it goes out last.
 	if (m_depth_fuse->IsHeld())
 		DoRenderHW(m_depth_fuse->Release());
+	if (m_dual_fuse && m_dual_fuse->IsHeld())
+		DoRenderHW(m_dual_fuse->Release());
 	m_flushing = false;
 
 	m_deferred_draw_count = 0;

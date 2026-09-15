@@ -103,6 +103,13 @@
           </property>
          </widget>
         </item>
+        <item row="0" column="1">
+         <widget class="QCheckBox" name="fuseLayeredDraws">
+          <property name="text">
+           <string>Fuse Layered Draws</string>
+          </property>
+         </widget>
+        </item>
         <item row="2" column="1">
          <widget class="QCheckBox" name="spinCPUDuringReadbacks">
           <property name="text">
@@ -409,6 +416,7 @@
   <tabstop>gsBackThreadMode</tabstop>
   <tabstop>extendedUpscales</tabstop>
   <tabstop>coalesceRenderPasses</tabstop>
+  <tabstop>fuseLayeredDraws</tabstop>
   <tabstop>spinGPUDuringReadbacks</tabstop>
   <tabstop>spinCPUDuringReadbacks</tabstop>
   <tabstop>useBlitSwapChain</tabstop>

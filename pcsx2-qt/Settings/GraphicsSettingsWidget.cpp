@@ -251,6 +251,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_advanced.spinGPUDuringReadbacks, "EmuCore/GS", "HWSpinGPUForReadbacks", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_advanced.rovBarriersVK, "EmuCore/GS", "HWROVBarriersVK", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_advanced.coalesceRenderPasses, "EmuCore/GS", "CoalesceRenderPasses", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_advanced.fuseLayeredDraws, "EmuCore/GS", "FuseLayeredDraws", true);
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_advanced.texturePreloading, "EmuCore/GS", "texture_preloading", static_cast<int>(TexturePreloadingLevel::Off));
 
 	setTabVisible(m_advanced_tab, QtHost::ShouldShowAdvancedSettings());
@@ -525,6 +526,11 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 			   "starting a new one every time a game alternates between two targets. Intended for tiling GPUs, where "
 			   "every pass boundary costs a full tile load and store - it does nothing useful on a desktop GPU. Rendering "
 			   "is unchanged either way. Games known to benefit have it enabled automatically."));
+		dialog()->registerWidgetHelp(m_advanced.fuseLayeredDraws, tr("Fuse Layered Draws"), tr("Checked"),
+			tr("Draws a mesh that a game submits twice in a row - a base layer, then the same geometry with a second "
+			   "texture added over it - as one draw with both layers in the shader, instead of two. Cuts the per-draw "
+			   "cost on scenes built that way. Pixels where the mesh sits at exactly the depth already in the buffer "
+			   "lose the second layer, which the game would have drawn there alone."));
 
 		// Software
 		dialog()->registerWidgetHelp(m_sw.swTextureFiltering, tr("Software Texture Filtering"), tr("Bilinear (PS2)"),

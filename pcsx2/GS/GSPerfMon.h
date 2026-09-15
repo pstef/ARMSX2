@@ -61,6 +61,10 @@ public:
 		// stats.json without reconstructing it from a draw stream.
 		RenderPassAreaPixels,
 
+		// Pairs the dual-stage fold turned into one draw (see GSDualFuseLatch). One count is one
+		// submission removed, so DrawCalls falls by the same number.
+		DualFusedPairs,
+
 		CounterLast,
 
 		// Reused counters for HW.
