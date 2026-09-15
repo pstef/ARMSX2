@@ -261,7 +261,9 @@ bool GSDualFuseLatch::IsTwin(const GSHWDrawConfig& config) const
 			sizeof(GSHWDrawConfig::PSConstantBuffer) - sizeof(GSVector4)) != 0)
 		return false;
 
-	// Same geometry, down to the byte outside the vertex colour.
+	// Same geometry, down to the byte outside the vertex colour - or the renderer's word for it.
+	if (config.geometry_matches_held)
+		return true;
 	if (std::memcmp(config.indices, m_config.indices, sizeof(u16) * config.nindices) != 0)
 		return false;
 	return SameGeometryOutsideColour(config.verts, m_config.verts, config.nverts);

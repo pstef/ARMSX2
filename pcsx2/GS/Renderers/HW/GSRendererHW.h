@@ -220,7 +220,7 @@ private:
 	void DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Target* ds, GSTextureCache::Source* tex, const TextureMinMaxResult& tmm);
 
 	void ResetStates();
-	void HandleFlatShadedVertices();
+	bool HandleFlatShadedVertices();
 	void SetupIA(float target_scale, float sx, float sy, bool req_vert_backup, const bool no_rt);
 	void EmulateTextureShuffleAndFbmask(GSTextureCache::Target* rt, GSTextureCache::Source* tex);
 	/// What the exact alpha-mask rules can do with this draw's alpha FBMSK without changing a
@@ -351,10 +351,15 @@ private:
 		u32 nindices = 0;
 		NoGapsType covers_without_gaps = {};
 		bool union_covers_rect = false;
+		/// Whether HandleFlatShadedVertices() de-indexed the base; it reads the colours, so the
+		/// twin has to be asked the same before its geometry can be called the base's.
+		bool deindexed = false;
 		bool staged = false;
 		bool valid = false;
 	};
 	TwinBase m_twin_base;
+	/// True for the length of a twin's DrawPrims() call from TryDrawTwin().
+	bool m_drawing_twin = false;
 	void TwinRegisters(u64* out) const;
 	void StageTwinBase(GSTextureCache::Target* rt, GSTextureCache::Target* ds, GSTextureCache::Source* src, const TextureMinMaxResult& tmm, bool plain_draw);
 	bool TryDrawTwin(u32 fm, u32 zm);

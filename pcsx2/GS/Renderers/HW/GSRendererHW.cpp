@@ -3082,6 +3082,7 @@ bool GSRendererHW::TryDrawTwin(u32 fm, u32 zm)
 	if (!base.valid)
 		return false;
 	base.valid = false;
+	base.staged = false;
 
 	const GSHWDrawConfig* held = g_gs_device->HeldDualBase();
 	if (!held || !GSConfig.FuseLayeredDraws)
@@ -3206,7 +3207,9 @@ bool GSRendererHW::TryDrawTwin(u32 fm, u32 zm)
 	else
 		ds->m_age = 0;
 
+	m_drawing_twin = true;
 	DrawPrims(rt, ds, src, base.tmm);
+	m_drawing_twin = false;
 
 	// What Draw() does after DrawPrims() for a draw that writes colour and no depth.
 	g_texture_cache->InvalidateTemporarySource();
@@ -5873,7 +5876,8 @@ bool GSRendererHW::VerifyIndices()
 	return true;
 }
 
-void GSRendererHW::HandleFlatShadedVertices()
+// Returns true if it de-indexed the draw.
+bool GSRendererHW::HandleFlatShadedVertices()
 {
 	// These cases might need fixing.
 	const bool maybe_fix_vertices = !m_conf.vs.iip &&
@@ -5883,7 +5887,7 @@ void GSRendererHW::HandleFlatShadedVertices()
 	const bool dont_fix_vertices = m_vt.m_primclass == GS_POINT_CLASS || m_vt.m_primclass == GS_SPRITE_CLASS;
 
 	if (!maybe_fix_vertices || dont_fix_vertices)
-		return;
+		return false;
 
 	const int n = GSUtil::GetClassVertexCount(m_vt.m_primclass);
 
@@ -5903,7 +5907,7 @@ void GSRendererHW::HandleFlatShadedVertices()
 			break;
 	}
 	if (prims_flat)
-		return;
+		return false;
 
 	// De-index the vertices using the copy buffer
 	while (m_vertex->maxcount < m_index->tail)
@@ -5922,6 +5926,7 @@ void GSRendererHW::HandleFlatShadedVertices()
 		for (u32 j = 0; j < n - 1; j++)
 			m_vertex->buff[i + j].RGBAQ.U32[0] = m_vertex->buff[i + n - 1].RGBAQ.U32[0];
 	}
+	return true;
 }
 
 void GSRendererHW::SetupIA(float target_scale, float sx, float sy, bool req_vert_backup, const bool no_rt)
@@ -10634,7 +10639,13 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
 
 	m_conf.scissor = (date_options.enabled && !date_options.barrier) ? m_conf.drawarea : scissor;
 
-	HandleFlatShadedVertices();
+	const bool deindexed = HandleFlatShadedVertices();
+	if (m_twin_base.staged)
+		m_twin_base.deindexed = deindexed;
+	// TryDrawTwin() found the twin's geometry equal to the base's as the kick wrote both;
+	// SetupIA() rewrites the two the same way, and the flat-shading fix-up, the one step that
+	// reads the colours, touched neither.
+	m_conf.geometry_matches_held = m_drawing_twin && !deindexed && !m_twin_base.deindexed;
 
 	SetupIA(rtscale, vs_scale_x, vs_scale_y, m_channel_shuffle_width != 0, no_rt);
 

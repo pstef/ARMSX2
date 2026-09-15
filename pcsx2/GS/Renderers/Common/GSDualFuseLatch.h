@@ -66,9 +66,10 @@ public:
 	void Hold(const GSHWDrawConfig& config);
 
 	/// True when [config] is the held draw's accumulation twin: the same geometry down to the
-	/// byte outside the vertex colour, the same shader configuration outside the bits the
-	/// second stage carries for itself, ZTST_GEQUAL with no depth write, and the ONE/ONE
-	/// accumulation of a shader-side Cs*As.
+	/// byte outside the vertex colour (read here, unless the renderer set
+	/// geometry_matches_held), the same shader configuration outside the bits the second
+	/// stage carries for itself, ZTST_GEQUAL with no depth write, and the ONE/ONE accumulation
+	/// of a shader-side Cs*As.
 	bool IsTwin(const GSHWDrawConfig& config) const;
 
 	/// Turns the held draw into the fused draw and hands it back, emptying the latch. [twin]

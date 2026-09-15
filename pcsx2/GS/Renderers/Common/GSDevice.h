@@ -1360,6 +1360,11 @@ struct alignas(16) GSHWDrawConfig
 	/// tex. Cleared by GSRendererHW::ResetStates along with the rest of the block above cb_vs.
 	GSTexture* dual_tex;
 
+	/// Set by a renderer that has itself compared this draw's vertices and indices with the
+	/// held dual-stage base's the way GSDualFuseLatch::IsTwin() would - equal outside the
+	/// vertex colour - so the latch need not read them again. Cleared with the block above.
+	bool geometry_matches_held;
+
 	VSConstantBuffer cb_vs;
 	PSConstantBuffer cb_ps;
 	
