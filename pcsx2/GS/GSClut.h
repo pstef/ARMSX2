@@ -24,7 +24,6 @@ class alignas(32) GSClut final : public GSAlignedClass<32>
 	u32 m_CBP[2] = {};
 	u16* m_clut = nullptr;
 	u32* m_buff32 = nullptr;
-	u64* m_buff64 = nullptr;
 
 	struct alignas(32) WriteState
 	{
@@ -85,10 +84,6 @@ class alignas(32) GSClut final : public GSAlignedClass<32>
 	//static void ReadCLUT_T16_I8(const u16* RESTRICT clut, u32* RESTRICT dst);
 	//static void ReadCLUT_T16_I4(const u16* RESTRICT clut, u32* RESTRICT dst);
 	//static void ReadCLUT_T16_I4(const u16* RESTRICT clut, u32* RESTRICT dst32, u64* RESTRICT dst64);
-public:
-	static void ExpandCLUT64_T32_I8(const u32* RESTRICT src, u64* RESTRICT dst);
-
-private:
 	static void ExpandCLUT64_T32(const GSVector4i& hi, const GSVector4i& lo0, const GSVector4i& lo1, const GSVector4i& lo2, const GSVector4i& lo3, GSVector4i* dst);
 	static void ExpandCLUT64_T32(const GSVector4i& hi, const GSVector4i& lo, GSVector4i* dst);
 	//static void ExpandCLUT64_T16_I8(const u32* RESTRICT src, u64* RESTRICT dst);
@@ -139,5 +134,4 @@ public:
 	u32 operator[](size_t i) const { return m_buff32[i]; }
 
 	operator const u32*() const { return m_buff32; }
-	operator const u64*() const { return m_buff64; }
 };
